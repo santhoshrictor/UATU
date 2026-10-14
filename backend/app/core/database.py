@@ -44,6 +44,7 @@ def check_database_readiness(
     result: Dict[str, Any] = {
         "connected": False,
         "latency_ms": None,
+        "server_version": None,
         "schema_ready": False,
         "alembic_version": None,
         "tables_present": [],
@@ -52,11 +53,12 @@ def check_database_readiness(
 
     try:
         with check_engine.connect() as conn:
-            # 1. Test basic connectivity
-            conn.execute(text("SELECT 1"))
+            # 1. Test basic connectivity and retrieve real server version
+            version_res = conn.execute(text("SELECT version();")).scalar()
             elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
             result["connected"] = True
             result["latency_ms"] = elapsed_ms
+            result["server_version"] = version_res.split(" on ")[0] if version_res else "PostgreSQL (Unknown)"
 
             # 2. Check alembic_version table
             inspector = inspect(conn)

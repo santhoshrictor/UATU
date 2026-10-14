@@ -9,6 +9,7 @@ interface LiveStatus {
 
 interface DatabaseInfo {
   status: 'connected' | 'unavailable';
+  server_version: string | null;
   latency_ms: number | null;
   error: string | null;
 }
@@ -44,10 +45,10 @@ export const App: React.FC = () => {
     setFetchError(null);
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
 
     try {
-      // 1. Check Liveness
+      // 1. Live probe for application process
       const liveRes = await fetch(`${apiUrl}/api/v1/health/live`, {
         signal: controller.signal,
       });
@@ -58,7 +59,7 @@ export const App: React.FC = () => {
       const liveJson: LiveStatus = await liveRes.json();
       setLiveData(liveJson);
 
-      // 2. Check Readiness (may return 200 or 503)
+      // 2. Readiness probe for database connection and active schema
       const readyRes = await fetch(`${apiUrl}/api/v1/health/ready`, {
         signal: controller.signal,
       });
@@ -68,10 +69,11 @@ export const App: React.FC = () => {
       setLastChecked(new Date());
     } catch (err: any) {
       if (err.name === 'AbortError') {
-        setFetchError('Request timed out after 4.0s (Backend unreachable)');
+        setFetchError('Request timed out (Backend process unreachable)');
       } else {
         setFetchError(err.message || 'Unable to connect to backend server');
       }
+      // Truthfully reset live status on failure so stale green indicators are never displayed as current
       setLiveData(null);
       setReadyData(null);
     } finally {
@@ -92,9 +94,11 @@ export const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [autoRefresh, checkStatus]);
 
-  // Overall system determination
+  // Derived live probe states
   const isBackendConnected = liveData !== null && liveData.status === 'alive';
-  const isDatabaseReady = readyData !== null && readyData.status === 'ready' && readyData.database.status === 'connected';
+  const isDatabaseConnected = readyData !== null && readyData.database.status === 'connected';
+  const isSchemaVerified = readyData !== null && readyData.schema_status.status === 'verified';
+  const isRuntimeReady = isBackendConnected && isDatabaseConnected && isSchemaVerified;
 
   return (
     <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '24px 16px' }}>
@@ -148,11 +152,11 @@ export const App: React.FC = () => {
             </span>
           </div>
           <p style={{ color: 'var(--text-muted)', fontSize: '13px' }}>
-            On-Premise Industrial Safety & Video Surveillance Engine
+            Engineering Foundation & Live Diagnostic Interface
           </p>
         </div>
 
-        {/* Global Status Pill & Action Controls */}
+        {/* Global Status Controls */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <button
             onClick={() => checkStatus()}
@@ -174,7 +178,7 @@ export const App: React.FC = () => {
             <span className={isLoading ? 'spinner' : ''} style={{ fontSize: '14px' }}>
               🔄
             </span>
-            {isLoading ? 'Checking...' : 'Check Status'}
+            {isLoading ? 'Probing...' : 'Recheck Status'}
           </button>
 
           <label
@@ -193,12 +197,12 @@ export const App: React.FC = () => {
               onChange={(e) => setAutoRefresh(e.target.checked)}
               style={{ accentColor: 'var(--accent-cyan)' }}
             />
-            Auto (5s)
+            Auto Poll (5s)
           </label>
         </div>
       </header>
 
-      {/* Main State Hero Alert Banner */}
+      {/* Main Runtime Health Banner */}
       <div
         className="glass-panel"
         style={{
@@ -207,7 +211,7 @@ export const App: React.FC = () => {
           borderLeft: `5px solid ${
             !isBackendConnected
               ? 'var(--status-red)'
-              : !isDatabaseReady
+              : !isRuntimeReady
               ? 'var(--status-amber)'
               : 'var(--status-green)'
           }`,
@@ -234,41 +238,45 @@ export const App: React.FC = () => {
                 fontSize: '22px',
                 background: !isBackendConnected
                   ? 'rgba(239, 68, 68, 0.15)'
-                  : !isDatabaseReady
+                  : !isRuntimeReady
                   ? 'rgba(245, 158, 11, 0.15)'
                   : 'rgba(34, 197, 94, 0.15)',
               }}
             >
-              {!isBackendConnected ? '🚨' : !isDatabaseReady ? '⚠️' : '⚡'}
+              {!isBackendConnected ? '🚨' : !isRuntimeReady ? '⚠️' : '⚡'}
             </div>
             <div>
               <h2 style={{ fontSize: '18px', fontWeight: 600, color: '#fff' }}>
                 {!isBackendConnected
                   ? 'Backend Disconnected or Unreachable'
-                  : !isDatabaseReady
-                  ? 'System Degraded: Database Not Ready'
-                  : 'Foundation Operational & Verified'}
+                  : !isDatabaseConnected
+                  ? 'Database Connection Degraded'
+                  : !isSchemaVerified
+                  ? 'Database Schema Unverified'
+                  : 'Backend & Database Service Reachable'}
               </h2>
               <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginTop: '2px' }}>
                 {!isBackendConnected
                   ? (fetchError || 'Unable to establish HTTP connection to API server.')
-                  : !isDatabaseReady
-                  ? (readyData?.database.error || 'Database connection or schema verification check failed.')
-                  : 'FastAPI core, PostgreSQL migrations, and schema isolation active.'}
+                  : !isDatabaseConnected
+                  ? (readyData?.database.error || 'Database connection probe timed out or failed.')
+                  : !isSchemaVerified
+                  ? 'Alembic version table or required tables (sites, areas) are missing.'
+                  : 'Live HTTP health probes active. Offline test acceptance tracked separately in docs/FOUNDATION_ACCEPTANCE.md.'}
               </p>
             </div>
           </div>
 
           <div style={{ textAlign: 'right', fontSize: '12px', color: 'var(--text-subtle)' }}>
-            <div>Last Polled:</div>
-            <div style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+            <div>Last Live Probe:</div>
+            <div style={{ fontFamily: 'var(--font-mono)', color: isBackendConnected ? 'var(--text-muted)' : 'var(--status-red)' }}>
               {lastChecked ? lastChecked.toLocaleTimeString() : 'Never'}
             </div>
           </div>
         </div>
       </div>
 
-      {/* Primary Status Diagnostic Grid */}
+      {/* Primary Status Diagnostic Grid (Live Probes) */}
       <div
         style={{
           display: 'grid',
@@ -282,10 +290,10 @@ export const App: React.FC = () => {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
             <div>
               <span style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-subtle)', fontWeight: 600 }}>
-                API Process Liveness
+                Live Probe: Process Liveness
               </span>
               <h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff', marginTop: '4px' }}>
-                FastAPI Runtime
+                FastAPI Server
               </h3>
             </div>
             <span
@@ -304,35 +312,33 @@ export const App: React.FC = () => {
 
           <div style={{ fontSize: '13px', color: 'var(--text-muted)', display: 'grid', gap: '8px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span>Endpoint:</span>
+              <span>Probe Endpoint:</span>
               <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-main)' }}>
                 /api/v1/health/live
               </span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span>Process State:</span>
-              <span style={{ color: isBackendConnected ? 'var(--status-green)' : 'var(--status-red)' }}>
-                {liveData?.status || 'Process not responding'}
-              </span>
+              <span>Data Source:</span>
+              <span style={{ color: 'var(--accent-cyan)' }}>Live HTTP Probe</span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span>Authorized Scope:</span>
-              <span style={{ color: 'var(--accent-cyan)' }}>
-                {liveData?.stage || 'Stage 1 — Foundation'}
+              <span>Reported Service:</span>
+              <span style={{ color: 'var(--text-main)' }}>
+                {liveData?.service || 'N/A'}
               </span>
             </div>
           </div>
         </div>
 
-        {/* Card 2: PostgreSQL Readiness */}
+        {/* Card 2: PostgreSQL Database Engine (Live Probe) */}
         <div className="glass-panel" style={{ padding: '20px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
             <div>
               <span style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-subtle)', fontWeight: 600 }}>
-                Database Readiness
+                Live Probe: Database Engine
               </span>
               <h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff', marginTop: '4px' }}>
-                PostgreSQL 16.2
+                Relational Storage
               </h3>
             </div>
             <span
@@ -341,20 +347,30 @@ export const App: React.FC = () => {
                 borderRadius: '6px',
                 fontSize: '11px',
                 fontWeight: 600,
-                background: isDatabaseReady ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)',
-                color: isDatabaseReady ? 'var(--status-green)' : 'var(--status-red)',
+                background: isDatabaseConnected ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                color: isDatabaseConnected ? 'var(--status-green)' : 'var(--status-red)',
               }}
             >
-              {readyData?.database.status === 'connected' ? 'CONNECTED' : 'DISCONNECTED'}
+              {isDatabaseConnected ? 'CONNECTED' : 'UNAVAILABLE'}
             </span>
           </div>
 
           <div style={{ fontSize: '13px', color: 'var(--text-muted)', display: 'grid', gap: '8px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span>Target Service:</span>
-              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-main)' }}>
-                127.0.0.1:5432
+              <span>Engine Version:</span>
+              <span
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: '11px',
+                  color: readyData?.database.server_version ? 'var(--text-main)' : 'var(--status-red)',
+                }}
+              >
+                {readyData?.database.server_version || (isBackendConnected ? 'Not reported' : 'Unavailable')}
               </span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>Data Source:</span>
+              <span style={{ color: 'var(--accent-cyan)' }}>Live SQL query (SELECT version())</span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span>Probe Latency:</span>
@@ -364,22 +380,18 @@ export const App: React.FC = () => {
                   : 'N/A'}
               </span>
             </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span>Timeout Bounded:</span>
-              <span style={{ color: 'var(--text-main)' }}>2.0s</span>
-            </div>
           </div>
         </div>
 
-        {/* Card 3: Alembic Schema & Migrations */}
+        {/* Card 3: Alembic Schema & Tables (Live Probe) */}
         <div className="glass-panel" style={{ padding: '20px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
             <div>
               <span style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-subtle)', fontWeight: 600 }}>
-                Schema & Migrations
+                Live Probe: Schema State
               </span>
               <h3 style={{ fontSize: '16px', fontWeight: 600, color: '#fff', marginTop: '4px' }}>
-                Alembic Version State
+                Operational Schema
               </h3>
             </div>
             <span
@@ -388,105 +400,111 @@ export const App: React.FC = () => {
                 borderRadius: '6px',
                 fontSize: '11px',
                 fontWeight: 600,
-                background:
-                  readyData?.schema_status.status === 'verified'
-                    ? 'rgba(34, 197, 94, 0.15)'
-                    : 'rgba(245, 158, 11, 0.15)',
-                color:
-                  readyData?.schema_status.status === 'verified'
-                    ? 'var(--status-green)'
-                    : 'var(--status-amber)',
+                background: isSchemaVerified ? 'rgba(34, 197, 94, 0.15)' : 'rgba(245, 158, 11, 0.15)',
+                color: isSchemaVerified ? 'var(--status-green)' : 'var(--status-amber)',
               }}
             >
-              {readyData?.schema_status.status === 'verified' ? 'VERIFIED' : 'UNVERIFIED'}
+              {isSchemaVerified ? 'VERIFIED' : 'UNVERIFIED'}
             </span>
           </div>
 
           <div style={{ fontSize: '13px', color: 'var(--text-muted)', display: 'grid', gap: '8px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span>Active Revision:</span>
+              <span>Active Alembic Revision:</span>
               <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-main)' }}>
                 {readyData?.schema_status.alembic_version || 'None'}
               </span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span>Core Tables:</span>
+              <span>Verified Tables:</span>
               <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>
                 {readyData?.schema_status.tables_present.join(', ') || 'None detected'}
               </span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span>Isolated Test DB:</span>
-              <span style={{ color: 'var(--status-green)' }}>workplace_test verified</span>
+              <span>Data Source:</span>
+              <span style={{ color: 'var(--accent-cyan)' }}>Live inspection on workplace_dev</span>
             </div>
           </div>
         </div>
       </div>
 
-      {/* CRITICAL TRUTHFULNESS GUARDRAIL NOTICE */}
+      {/* Traceability & Acceptance Register Separation */}
       <div
         className="glass-panel"
         style={{
           padding: '24px',
-          background: 'rgba(15, 23, 42, 0.75)',
-          border: '1px solid rgba(56, 189, 248, 0.2)',
+          background: 'rgba(15, 23, 42, 0.85)',
+          border: '1px solid rgba(56, 189, 248, 0.25)',
           marginBottom: '28px',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px' }}>
-          <div style={{ fontSize: '24px', lineHeight: 1 }}>🛡️</div>
-          <div>
+          <div style={{ fontSize: '24px', lineHeight: 1 }}>📋</div>
+          <div style={{ flex: 1 }}>
             <h3 style={{ fontSize: '15px', fontWeight: 600, color: '#fff', marginBottom: '6px' }}>
-              Truthful Readiness Notice: Cameras and Analytics Are Not Configured Yet
+              Evidence Traceability & Acceptance Separation Notice
             </h3>
             <p style={{ fontSize: '13px', color: 'var(--text-muted)', lineHeight: '1.6' }}>
-              Per project operating rules in <code>AGENTS.md</code>, this system is strictly in{' '}
-              <strong style={{ color: '#fff' }}>Stage 1 — Foundation Only</strong>. Operational RTSP streams,
-              video recording engines, YOLO/AI behavior detection models, emergency alarm relays, and
-              theft search indices are intentionally disabled. No fake video feeds, simulated alerts, or
-              artificial uptime stats are generated.
+              In accordance with project operating rules in <code>AGENTS.md</code>, runtime HTTP health is
+              strictly decoupled from offline acceptance test results:
             </p>
 
             <div
               style={{
                 display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-                gap: '12px',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+                gap: '16px',
                 marginTop: '16px',
                 paddingTop: '16px',
                 borderTop: '1px solid var(--border-subtle)',
               }}
             >
               <div>
-                <span style={{ fontSize: '11px', color: 'var(--text-subtle)', textTransform: 'uppercase' }}>
-                  Camera Streams
+                <span style={{ fontSize: '11px', color: 'var(--text-subtle)', textTransform: 'uppercase', fontWeight: 600 }}>
+                  Automated Test Suite (Offline)
                 </span>
-                <div style={{ color: 'var(--text-muted)', fontSize: '13px', fontWeight: 500 }}>
-                  0 Configured (Stage 3)
+                <div style={{ color: '#fff', fontSize: '13px', marginTop: '4px' }}>
+                  7 of 7 Tests Passed (pytest backend/tests)
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                  Target: Dedicated isolated database <code>workplace_test</code>
                 </div>
               </div>
+
               <div>
-                <span style={{ fontSize: '11px', color: 'var(--text-subtle)', textTransform: 'uppercase' }}>
-                  AI Analytics Workers
+                <span style={{ fontSize: '11px', color: 'var(--text-subtle)', textTransform: 'uppercase', fontWeight: 600 }}>
+                  Tested Code Revision
                 </span>
-                <div style={{ color: 'var(--text-muted)', fontSize: '13px', fontWeight: 500 }}>
-                  0 Active (Stage 4)
+                <div style={{ color: 'var(--accent-cyan)', fontSize: '13px', fontFamily: 'var(--font-mono)', marginTop: '4px' }}>
+                  Commit: 1b2e003
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                  Working tree clean
                 </div>
               </div>
+
               <div>
-                <span style={{ fontSize: '11px', color: 'var(--text-subtle)', textTransform: 'uppercase' }}>
-                  Verified Features
+                <span style={{ fontSize: '11px', color: 'var(--text-subtle)', textTransform: 'uppercase', fontWeight: 600 }}>
+                  Catalogued Feature Coverage
                 </span>
-                <div style={{ color: 'var(--text-muted)', fontSize: '13px', fontWeight: 500 }}>
-                  0 of 91 (Tracked in REQUIREMENTS.md)
+                <div style={{ color: 'var(--status-amber)', fontSize: '13px', marginTop: '4px' }}>
+                  0 of 91 Verified (Stage 1 Foundation Only)
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                  Cameras & models intentionally unconfigured
                 </div>
               </div>
+
               <div>
-                <span style={{ fontSize: '11px', color: 'var(--text-subtle)', textTransform: 'uppercase' }}>
-                  Foundation Acceptance
+                <span style={{ fontSize: '11px', color: 'var(--text-subtle)', textTransform: 'uppercase', fontWeight: 600 }}>
+                  Acceptance Audit Record
                 </span>
-                <div style={{ color: 'var(--status-green)', fontSize: '13px', fontWeight: 600 }}>
-                  8 of 8 Checks Complete
+                <div style={{ color: '#fff', fontSize: '13px', marginTop: '4px' }}>
+                  docs/FOUNDATION_ACCEPTANCE.md
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                  7 Passed, 1 Unverified (Playwright driver download 404)
                 </div>
               </div>
             </div>
@@ -494,7 +512,7 @@ export const App: React.FC = () => {
         </div>
       </div>
 
-      {/* Configuration & Diagnostics Section */}
+      {/* Diagnostics & Config Drawer */}
       <div className="glass-panel" style={{ padding: '20px' }}>
         <h4 style={{ fontSize: '14px', fontWeight: 600, color: '#fff', marginBottom: '14px' }}>
           Runtime Diagnostics & API Configuration

@@ -44,6 +44,7 @@ def get_readiness(response: Response) -> ReadyResponse:
         timestamp=datetime.now(timezone.utc),
         database=DatabaseStatus(
             status="connected" if db_check["connected"] else "unavailable",
+            server_version=db_check.get("server_version"),
             latency_ms=db_check.get("latency_ms"),
             error=db_check.get("error"),
         ),

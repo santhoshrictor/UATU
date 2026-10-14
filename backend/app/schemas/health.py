@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 class DatabaseStatus(BaseModel):
     status: str = Field(..., description="'connected' or 'unavailable'")
+    server_version: Optional[str] = None
     latency_ms: Optional[float] = None
     error: Optional[str] = None
 
