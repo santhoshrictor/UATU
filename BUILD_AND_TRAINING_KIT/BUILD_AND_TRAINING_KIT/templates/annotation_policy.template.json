@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "example_only": true,
+  "policy_id": "DRAFT_REQUIRES_REVIEW",
+  "task_kind": "object_detection_baseline",
+  "classes": [
+    {
+      "id": 0,
+      "name": "person",
+      "definition": "Visible human body under the approved visibility/occlusion convention; does not identify an employee."
+    },
+    {
+      "id": 1,
+      "name": "vehicle",
+      "definition": "Draft generic class; replace with agreed vehicle subclasses only when required and annotatable."
+    }
+  ],
+  "attributes": {
+    "visibility": [
+      "visible",
+      "partly_occluded",
+      "unobservable"
+    ],
+    "review_state": [
+      "draft",
+      "reviewed",
+      "adjudicated"
+    ],
+    "identity_policy": "anonymous_camera_session_track_only"
+  },
+  "decisions_to_complete": [
+    "minimum visible size",
+    "box extent for occluded/truncated objects",
+    "ignore/unknown mapping supported by chosen trainer",
+    "track continuity through occlusion",
+    "labeling of every in-scope visible object",
+    "separate PPE/action/tool policies"
+  ],
+  "forbidden_inferences": [
+    "theft inferred from object movement",
+    "employee identity inferred from track ID",
+    "PPE absent when unobservable"
+  ],
+  "review_owner": null
+}

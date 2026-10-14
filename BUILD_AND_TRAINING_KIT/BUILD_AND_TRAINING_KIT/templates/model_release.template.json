@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0",
+  "example_only": true,
+  "model_id": null,
+  "version": null,
+  "use_case": null,
+  "status": "not_trained",
+  "artifact": {
+    "path": null,
+    "format": null,
+    "sha256": null
+  },
+  "code_revision": null,
+  "base_model_reference": null,
+  "licenses_reviewed": false,
+  "dataset_manifest_reference": null,
+  "training_run_reference": null,
+  "input_contract": {
+    "shape": null,
+    "dtype": null,
+    "color_order": null,
+    "normalization": null,
+    "resize_policy": null,
+    "temporal_sampling": null
+  },
+  "output_contract_reference": null,
+  "class_map_reference": null,
+  "postprocessing_reference": null,
+  "thresholds_source": "validation_only",
+  "runtime_compatibility": [],
+  "evaluation_report_reference": null,
+  "benchmark_report_reference": null,
+  "known_limitations": [],
+  "rollback_version": null,
+  "site_acceptance_reference": null,
+  "approved_by": null,
+  "approved_at": null
+}

@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "example_only": true,
+  "cameras": [
+    {
+      "camera_id": "REPLACE_CAMERA_ID",
+      "site_id": null,
+      "area_id": null,
+      "display_name": null,
+      "manufacturer": null,
+      "model": null,
+      "firmware": null,
+      "onvif_profiles_verified": [],
+      "camera_manual_reference": null,
+      "main_stream": {
+        "codec": null,
+        "width": null,
+        "height": null,
+        "fps": null,
+        "average_bitrate_mbps": null
+      },
+      "analytic_stream": {
+        "codec": null,
+        "width": null,
+        "height": null,
+        "fps": null
+      },
+      "credential_secret_reference": null,
+      "time_source": null,
+      "timezone": null,
+      "recording_policy_reference": null,
+      "privacy_review_status": "pending",
+      "zones": [],
+      "physical_connection_test_status": "not_tested"
+    }
+  ]
+}

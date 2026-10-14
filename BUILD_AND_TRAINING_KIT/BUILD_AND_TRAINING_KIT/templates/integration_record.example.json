@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "example_only": true,
+  "fixture_only": true,
+  "source_system": "EXAMPLE_ACCESS_CONTROLLER",
+  "source_device_id": "EXAMPLE_DOOR_READER",
+  "source_event_id": "EXAMPLE_EVENT_001",
+  "source_timestamp": "2026-10-01T09:00:00+05:30",
+  "received_at": "2026-10-01T03:30:01Z",
+  "event_type": "credential_access_granted",
+  "pseudonymous_credential_reference": "EXAMPLE_CREDENTIAL_A",
+  "door_id": "EXAMPLE_DOOR_A",
+  "sequence_number": 1,
+  "raw_payload_reference": null,
+  "authentication_method_description": "Use the actual vendor-supported method; no credentials in this example.",
+  "mapping_review_status": "not_reviewed"
+}
