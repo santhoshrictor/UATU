@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "Workplace Video Intelligence System"
+    PROJECT_NAME: str = "UATU AI Operations Platform"
     STAGE: str = "Stage 1 - Foundation Only"
     ENVIRONMENT: str = "development"
     DEBUG: bool = False
