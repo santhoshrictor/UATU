@@ -21,6 +21,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from backend.app.api.v1.api import api_router
 from backend.app.core.config import settings
 from backend.app.core.logging import logger
+from backend.app.vision_engine import process_spatial_frame
 
 # Base directory for uploads and video assets
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -236,10 +237,14 @@ class CameraDeviceWorker:
             if ret and frame is not None:
                 consecutive_errors = 0
                 self.is_live = True
+
+                # Feature 1 (Person Detection) & Feature 2 (Vehicle Detection) via YOLO11
+                annotated_frame, counts = process_spatial_frame(frame)
+
                 now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
                 label = f"UATU DEV-{self.device_id} [LIVE] {now_str}"
                 cv2.putText(
-                    frame,
+                    annotated_frame,
                     label,
                     (16, 28),
                     cv2.FONT_HERSHEY_SIMPLEX,
@@ -247,8 +252,21 @@ class CameraDeviceWorker:
                     (16, 185, 129),
                     2,
                 )
+
+                # Live spatial object counts overlay
+                count_label = f"PERSONS: {counts['persons']} | VEHICLES: {counts['vehicles']}"
+                cv2.putText(
+                    annotated_frame,
+                    count_label,
+                    (16, 52),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.50,
+                    (255, 200, 0),
+                    2,
+                )
+
                 _, encoded = cv2.imencode(
-                    ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
+                    ".jpg", annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
                 )
                 jpeg_bytes = encoded.tobytes()
                 with self.frame_lock:

@@ -278,3 +278,26 @@ This document provides a permanent, auditable ledger of all file additions, conf
      - Full backend pytest suite passing: 17/17 tests (100%).
      - Frontend production bundle build verified with `tsc -b && vite build` (0 errors) and `oxlint` (0 warnings).
 - **Technical Justification:** Bridges registered facial biometric profiles and live optical camera sensors into an automated, real-time access control decision engine with person-count tailgating deterrence.
+
+---
+
+#### 2026-10-22 13:15:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/app/main.py`, `backend/main.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `CREATE` & `UPDATE`
+- **Summary:** Integrated YOLO11 spatial object detection pipeline (Feature 1: Person Detection & Feature 2: Vehicle Detection) into the multi-camera live video streaming harness:
+  1. **YOLO11 Vision Engine (`backend/app/vision_engine.py`):**
+     - Initialized local model pointing to `backend/models/yolo11n.pt` with automatic weight download and CUDA 12.1 GPU acceleration (`device='cuda:0'`).
+     - Defined `process_spatial_frame(frame: np.ndarray) -> (annotated_frame, counts)`:
+       - Runs real-time inference on raw OpenCV BGR frames.
+       - Filters detections strictly for Persons (COCO class 0) and Vehicles (COCO classes 2: car, 3: motorcycle, 5: bus, 7: truck).
+       - Draws high-contrast, minimalist bounding boxes (Emerald Green `(16, 185, 129)` for persons; Vivid Cyan `(255, 200, 0)` for vehicles) with background label tags and confidence scores.
+       - Returns tuple of annotated image matrix and real-time count dictionary `{"persons": count, "vehicles": count}`.
+  2. **Multi-Camera Worker Integration (`backend/app/main.py` & `backend/main.py`):**
+     - Imported `process_spatial_frame` into camera capture loop (`CameraDeviceWorker._run()`).
+     - Passes raw camera frame through `process_spatial_frame` prior to JPEG compression, ensuring all active MJPEG streams (`/api/webcam-stream/{device_id}`) render spatial bounding reticles in real time.
+     - Overlaid live spatial telemetry directly onto the top-left corner of the video feed: `PERSONS: {count} | VEHICLES: {count}`.
+     - Exported `process_spatial_frame` in root entry point `backend/main.py`.
+  3. **Verification & Testing:**
+     - Created `backend/tests/test_vision_engine.py` verifying frame processing, empty/None handling, detection filtering, and bounding box drawing.
+     - Full test suite passed: 19/19 tests (100%).
+- **Technical Justification:** Initiates automated spatial intelligence across the physical surveillance grid, equipping live camera channels with GPU-accelerated human and vehicle localization without introducing frame drops or DirectShow lock contention.

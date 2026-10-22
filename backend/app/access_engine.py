@@ -209,8 +209,8 @@ class AccessCorrelationEngine:
         JSON-serializable dictionary with access verdict, confidence score,
         occupancy count, and spatial bounding boxes.
         """
-        # Fallback to simulation if models are not loaded or frame is missing
-        if self.is_simulated or self.yolo_model is None or video_frame is None:
+        # Fallback to simulation if models are not loaded, frame is missing, or forced simulation count
+        if self.is_simulated or self.yolo_model is None or video_frame is None or simulated_person_count is not None:
             return self._evaluate_simulated_event(
                 video_frame=video_frame,
                 scanned_rfid=scanned_rfid,
@@ -224,28 +224,31 @@ class AccessCorrelationEngine:
         bounding_boxes: List[Dict[str, Any]] = []
         person_count = 0
 
-        try:
-            results = self.yolo_model(video_frame, classes=[0], verbose=False)
-            for r in results:
-                boxes = r.boxes
-                for box in boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
-                    conf = float(box.conf[0])
-                    if conf >= 0.35:  # Confidence threshold for human presence
-                        person_count += 1
-                        bounding_boxes.append(
-                            {
-                                "x1": round(x1, 1),
-                                "y1": round(y1, 1),
-                                "x2": round(x2, 1),
-                                "y2": round(y2, 1),
-                                "confidence": round(conf, 3),
-                                "label": "person",
-                            }
-                        )
-        except Exception as e:
-            logger.error(f"Error during YOLO person detection inference: {e}")
-            person_count = 1
+        if simulated_person_count is not None:
+            person_count = simulated_person_count
+        else:
+            try:
+                results = self.yolo_model(video_frame, classes=[0], verbose=False)
+                for r in results:
+                    boxes = r.boxes
+                    for box in boxes:
+                        x1, y1, x2, y2 = box.xyxy[0].tolist()
+                        conf = float(box.conf[0])
+                        if conf >= 0.35:  # Confidence threshold for human presence
+                            person_count += 1
+                            bounding_boxes.append(
+                                {
+                                    "x1": round(x1, 1),
+                                    "y1": round(y1, 1),
+                                    "x2": round(x2, 1),
+                                    "y2": round(y2, 1),
+                                    "confidence": round(conf, 3),
+                                    "label": "person",
+                                }
+                            )
+            except Exception as e:
+                logger.error(f"Error during YOLO person detection inference: {e}")
+                person_count = 1
 
         # Check for TAILGATING breach: Multiple individuals in turnstile zone
         if person_count > 1:
