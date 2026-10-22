@@ -20,7 +20,7 @@ from backend.app.access_engine import (
     access_engine,
     evaluate_entry_event,
 )
-from backend.app.vision_engine import process_spatial_frame
+from backend.app.vision_engine import SpatialTracker
 
 __all__ = [
     "app",
@@ -37,6 +37,6 @@ __all__ = [
     "AccessCorrelationEngine",
     "access_engine",
     "evaluate_entry_event",
-    "process_spatial_frame",
+    "SpatialTracker",
 ]
 

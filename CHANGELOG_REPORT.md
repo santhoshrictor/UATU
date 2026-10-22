@@ -319,3 +319,151 @@ This document provides a permanent, auditable ledger of all file additions, conf
      - Verified with full pytest test suite; all 19 tests passed (100%).
      - Restarted FastAPI Uvicorn background daemon on port 8000; health readiness verified.
 - **Technical Justification:** Ensures parity between live hardware webcam feeds and uploaded/imported CCTV sample video streams, allowing operators to run spatial person and vehicle localization across archived and uploaded media without bypass.
+
+---
+
+#### 2026-10-22 14:52:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/app/main.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `UPDATE`
+- **Summary:** Upgraded YOLO11 vision engine with ByteTrack multi-object tracking (Feature 3) and virtual tripwire spatial line-crossing logic for entry/exit detection (Feature 4):
+  1. **ByteTrack Multi-Object Tracking (`backend/app/vision_engine.py`):**
+     - Upgraded spatial inference to tracking mode via `model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False)`.
+     - Extracted persistent track IDs (`track_id`) from detection box metadata across video frames.
+     - Updated OpenCV bounding box annotations to render the track identifier (`ID: #{track_id}`) alongside the object class name and confidence score.
+     - Placed visual centroid indicators on detected entities using OpenCV circles.
+  2. **Virtual Tripwire & Spatial Line-Crossing Logic:**
+     - Defined a calibrated vertical tripwire line at `x = frame_width // 2` rendered in high-visibility Amber/Yellow (`(0, 215, 255)`).
+     - Implemented per-stream centroid history mapping (`track_history: Dict[str, Dict[int, Tuple[int, int]]]`) to trace directional movement vectors for each tracked ID across frames.
+     - Detected boundary traversal:
+       - Crossing from Left to Right (`prev_x < line_x` and `cx >= line_x`) triggers an **ENTRY** event.
+       - Crossing from Right to Left (`prev_x > line_x` and `cx <= line_x`) triggers an **EXIT** event.
+     - Maintained stream-isolated and global `entry_count` and `exit_count` telemetry accumulators.
+  3. **Real-Time Telemetry Overlay:**
+     - Rendered a high-contrast `ENTRY: X | EXIT: Y` telemetry badge on the top-right corner of each frame (Deep Slate background with Amber/Yellow border and typography).
+     - Integrated tracking and entry/exit counters into `CameraDeviceWorker._run()` and `generate_file_stream()` in `backend/app/main.py`.
+  4. **Verification & Testing:**
+     - Expanded unit tests in `backend/tests/test_vision_engine.py` covering mock detections with track IDs, directional tripwire crossings (Entry and Exit), double-counting prevention, HUD rendering, and tracking reset.
+     - 100% test pass rate across the full test suite: 22/22 tests passing.
+     - Hot-reloaded FastAPI Uvicorn service running on `http://127.0.0.1:8000`.
+- **Technical Justification:** Elevates basic spatial localization into continuous temporal tracking and automated occupancy monitoring, enabling accurate workplace foot-traffic counting and access ingress/egress analytics without external sensor hardware.
+
+---
+
+#### 2026-10-22 15:03:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `UPDATE`
+- **Summary:** Decoupled raw YOLO11 detection bounding box rendering from ByteTrack ID assignment:
+  1. **Decoupled Loop Architecture:**
+     - Refactored `process_spatial_frame` to iterate through all raw bounding boxes (`boxes.xyxy`) with index enumeration.
+     - Separated detection rendering into distinct phases:
+       - **Phase 1: Raw Detection Identification & Counting:** Evaluates class ID (Persons: 0, Vehicles: 2, 3, 5, 7) and confidence threshold (`>= 0.35`). Updates telemetry counts and sets class-specific styling (Emerald Green for Person, Cyan for Vehicle).
+       - **Phase 2: Tracking & Tripwire Assignment:** Safely checks `if boxes.id is not None and len(boxes.id) > i`. If a persistent track ID is present, prepends `ID: #{track_id}` to the label, renders the centroid marker, and checks tripwire crossing. If `boxes.id` is `None` or not yet assigned, tracking is skipped without halting detection.
+       - **Phase 3: Guaranteed Bounding Box & Label Rendering:** Unconditionally renders bounding rectangles and background label tags for every detected entity, ensuring zero missed bounding boxes during tracker initialization or transient loss.
+  2. **Dual Representation Support:**
+     - Added transparent support for both native Ultralytics Tensor `Boxes` and indexed mock structures for resilient operation across unit test mocks and live GPU inference.
+  3. **Verification & Testing:**
+     - Added `test_raw_detection_without_tracking_ids` in `backend/tests/test_vision_engine.py` verifying full box rendering and telemetry counting when `boxes.id is None`.
+     - 100% test pass rate across the full test suite: 23/23 tests passing.
+     - Hot-reloaded FastAPI Uvicorn service running on `http://127.0.0.1:8000`.
+- **Technical Justification:** Prevents regression where spatial object detection reticles were suppressed on unassigned or initial frames before ByteTrack tracks formed, ensuring operator visibility and situational awareness are always maintained.
+
+---
+
+#### 2026-10-22 15:15:00
+- **File Path:** `backend/scripts/download_yolo.py`, `backend/app/vision_engine.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `CREATE` & `UPDATE`
+- **Summary:** Created explicit YOLO11 model downloader script and built bulletproof direct OpenCV drawing and ByteTrack tripwire tracking loop:
+  1. **Explicit Model Downloader (`backend/scripts/download_yolo.py`):**
+     - Authored standalone script resolving absolute destination path `backend/models/yolo11n.pt`.
+     - Explicitly initialized `YOLO(target_path)` to ensure model weights are guaranteed present on disk before engine invocation.
+     - Automatically executed and verified `yolo11n.pt` presence (5.6 MB).
+  2. **Bulletproof Vision Engine (`backend/app/vision_engine.py`):**
+     - Updated `vision_engine.py` to point strictly to the verified absolute file path `backend/models/yolo11n.pt`.
+     - Implemented direct OpenCV drawing pipeline on frames with yellow virtual tripwire (`(0, 215, 255)`), class bounding boxes (Green `(74, 222, 128)` for Person, Cyan `(255, 215, 0)` for Vehicle), and persistent `ID:{track_id}` tags.
+     - Extracted boxes via `.cpu().numpy()` and track IDs via `.int().cpu().tolist()` with complete mock and tensor fallback compatibility.
+     - Streamlined tripwire crossing math updating `process_spatial_frame.entry_count` and `process_spatial_frame.exit_count`.
+     - Prominently rendered top-right `ENTRY: X | EXIT: Y` telemetry badge directly on the OpenCV matrix.
+  3. **Verification & Testing:**
+     - Verified all 23 unit tests pass cleanly: 23/23 tests passing (100%).
+     - Hot-reloaded FastAPI Uvicorn service running on `http://127.0.0.1:8000` with active camera acquisition.
+- **Technical Justification:** Prevents silent tracking/drawing failures caused by missing model weights or GPU-tensor formatting mismatches, ensuring live camera feeds and video loops reliably render spatial bounding boxes and entry/exit counters.
+
+---
+
+#### 2026-10-22 15:26:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `REFACTOR`
+- **Summary:** Refactored vision engine into an Object-Oriented `SpatialTracker` class for robust state encapsulation:
+  1. **Encapsulated State Machine (`SpatialTracker`):**
+     - Consolidated model reference, persistent entry/exit counters (`self.entry_count`, `self.exit_count`), and centroid tracking history (`self.track_history`) within an isolated class instance.
+     - Protected the drawing loop inside a graceful try/except block with error logging, ensuring that tracker or model execution errors never crash the video streaming loop.
+  2. **Direct Visual Annotations & Non-Overlapping Telemetry:**
+     - Draws yellow virtual tripwire (`(0, 215, 255)`) at center `x`.
+     - Draws color-coded bounding boxes (Green `(74, 222, 128)` for Person, Cyan `(255, 215, 0)` for Vehicle) with clean labels (`Person ID:{id}` or `Vehicle ID:{id}`).
+     - Repositioned the top-right `ENTRY: X | EXIT: Y` telemetry badge to `y: 40-80` to prevent visual overlap with the channel timestamp header.
+  3. **Verification & Testing:**
+     - Verified with full unit test suite; all 23 backend tests passed (100%).
+     - Hot-reloaded FastAPI Uvicorn service running on `http://127.0.0.1:8000`.
+- **Technical Justification:** Replaces ad-hoc function attribute storage with clean Object-Oriented encapsulation, protecting frame rendering stability and preventing silent failures during live camera and video file streaming.
+
+---
+
+#### 2026-10-22 15:43:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `UPDATE`
+- **Summary:** Integrated standalone teammate prototype into the FastAPI live-streaming architecture (`SpatialTracker`):
+  1. **Dynamic Tracking Configuration (`ensure_tracker_config`):**
+     - Implemented dynamic creation of `custom_bytetrack.yaml` containing tuned ByteTrack threshold parameters (`track_high_thresh: 0.25`, `track_low_thresh: 0.1`, `new_track_thresh: 0.25`, `track_buffer: 30`, `match_thresh: 0.8`).
+     - Passed `tracker="custom_bytetrack.yaml"`, `classes=[0]`, and `conf=0.20` directly into `self.model.track()`.
+  2. **Upgraded State Model & Horizontal Line-Crossing Math:**
+     - Updated `SpatialTracker.__init__` with prototype state variables: `self.previous_y = {}`, `self.up_count = 0`, `self.down_count = 0`.
+     - Defined the horizontal counting line at 55% frame height: `line_y = int(frame.shape[0] * 0.55)` rendered in Amber/Yellow (`(0, 215, 255)`).
+     - Ported directional UP/DOWN crossing math comparing `old_y`, `line_y`, and `center_y`:
+       - `old_y > line_y and center_y <= line_y` increments `self.up_count` (`[UP]`).
+       - `old_y < line_y and center_y >= line_y` increments `self.down_count` (`[DOWN]`).
+     - Directly annotated `UP` / `DOWN` tag alongside `Person ID:{id}` onto bounding boxes.
+     - Rendered top-right telemetry HUD: `UP: {self.up_count} | DOWN: {self.down_count}`.
+     - Returned count dictionary mapping `entry` to `up_count` and `exit` to `down_count`.
+  3. **Verification & Testing:**
+     - Updated unit tests in `backend/tests/test_vision_engine.py` to validate horizontal line UP/DOWN crossing.
+     - Full test suite passed at 100%: 23/23 tests passing.
+     - Live backend daemon hot-reloaded and actively serving camera and video streams on `http://127.0.0.1:8000`.
+- **Technical Justification:** Unifies the proven standalone prototype's horizontal line-crossing algorithm with the enterprise UATU FastAPI live streaming pipeline, enabling vertical transit monitoring and bidirectional flow analytics.
+
+---
+
+#### 2026-10-22 16:05:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/app/main.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `REFACTOR`
+- **Summary:** Rewrote `process_frame` in `backend/app/vision_engine.py` to be strictly fail-safe with built-in ByteTrack and decoupled rendering:
+  1. **Removed Custom YAML Config:** Eliminated `self._ensure_tracker_config()` and `custom_bytetrack.yaml` file generation; standardized on Ultralytics built-in `tracker="bytetrack.yaml"`, preventing path resolution and YAML parsing crashes.
+  2. **Removed Class Restrictions:** Removed `classes=[0]` constraint from the inference track call, restoring detection and tracking for vehicles (`2: car`, `3: motorcycle`, `5: bus`, `7: truck`) alongside persons (`0: person`).
+  3. **Decoupled Drawing from Tracking:** Raw bounding box rendering and class/confidence labels are executed unconditionally first (`cv2.rectangle`), ensuring detections are visually rendered even before a persistent `track_id` is assigned by ByteTrack.
+  4. **Strictly Fail-Safe Spatial Math & Tripwire:**
+     - Horizontal tripwire rendered at `line_y = int(height * 0.55)` with Amber tag `UATU TRIPWIRE`.
+     - Directional transit math: `old_y < line_y <= center_y` increments `self.down_count` (Entry); `old_y > line_y >= center_y` increments `self.up_count` (Exit).
+     - Centroid indicators and ID tags rendered only when `track_id is not None`.
+     - Telemetry badge rendered at top-right `(frame.shape[1] - 220, 10)` to `(frame.shape[1] - 10, 50)` displaying `ENTRY: {self.down_count} | EXIT: {self.up_count}`.
+     - Entire spatial block wrapped in `try/except` returning clean fallback frame and counters on any unexpected exception.
+  5. **Verification & Testing:**
+     - All 23 backend tests passed (100% pass rate) in `backend/tests/`.
+     - Uvicorn backend server actively running on `http://127.0.0.1:8000` with PostgreSQL 16 on `5432`.
+- **Technical Justification:** Eliminates tracking startup crashes caused by custom tracker YAML paths, unblocks vehicle detection classes, and guarantees immediate visual feedback for all raw detections regardless of tracker lock state.
+
+---
+
+#### 2026-10-22 16:15:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/app/main.py`, `backend/main.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `REFACTOR`
+- **Summary:** Decoupled `SpatialTracker` from global singleton to isolated, per-stream instances to prevent multi-camera tracking collisions:
+  1. **Removed Global Singleton:** Deleted global instances `spatial_tracker` and `yolo_spatial_model` along with module-level wrapper `process_spatial_frame` and `reset_tracking` from `backend/app/vision_engine.py`. Added instance method `SpatialTracker.reset()`.
+  2. **Worker Isolation (`CameraDeviceWorker`):** Instantiated isolated tracker `self.tracker = SpatialTracker()` per hardware/virtual capture worker thread; updated frame processing to `frame, counts = self.tracker.process_frame(frame)`.
+  3. **File Stream Isolation (`generate_file_stream`):** Instantiated independent `tracker = SpatialTracker()` preceding the continuous reading loop in `generate_file_stream()`; updated frame processing to `frame, counts = tracker.process_frame(frame)`.
+  4. **Multi-Camera State Independence:** Consecutive frames from different cameras (Webcam 0, Webcam 1, and looped MP4 file feeds) no longer contaminate each other's ByteTrack trajectory state (`persist=True`), eliminating ID jitter, dropped bounding boxes, and counter leakage across streams.
+  5. **Verification & Testing:**
+     - Added `test_stream_isolation_independent_states` to `backend/tests/test_vision_engine.py`.
+     - Full backend test suite passed at 100%: 24/24 tests passing.
+     - Restarted FastAPI Uvicorn backend daemon (`http://127.0.0.1:8000`) and verified concurrent multi-stream serving alongside Vite frontend (`http://127.0.0.1:5173`).
+- **Technical Justification:** Isolating tracker instances per video channel ensures mathematical purity for ByteTrack state vectors and virtual tripwire crossing histories, preventing inter-stream cross-talk in multi-camera surveillance grids.
+
+

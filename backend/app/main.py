@@ -21,7 +21,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from backend.app.api.v1.api import api_router
 from backend.app.core.config import settings
 from backend.app.core.logging import logger
-from backend.app.vision_engine import process_spatial_frame
+from backend.app.vision_engine import SpatialTracker
 
 # Base directory for uploads and video assets
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -193,6 +193,7 @@ class CameraDeviceWorker:
         self.frame_lock = threading.Lock()
         self.worker_thread = None
         self.is_live = False
+        self.tracker = SpatialTracker()
 
     def _open_capture(self):
         try:
@@ -238,8 +239,8 @@ class CameraDeviceWorker:
                 consecutive_errors = 0
                 self.is_live = True
 
-                # Feature 1 (Person Detection) & Feature 2 (Vehicle Detection) via YOLO11
-                annotated_frame, counts = process_spatial_frame(frame)
+                # Feature 1-4 (Person & Vehicle Detection, ByteTrack, Virtual Tripwire)
+                annotated_frame, counts = self.tracker.process_frame(frame)
 
                 now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
                 label = f"UATU DEV-{self.device_id} [LIVE] {now_str}"
@@ -254,7 +255,7 @@ class CameraDeviceWorker:
                 )
 
                 # Live spatial object counts overlay
-                count_label = f"PERSONS: {counts['persons']} | VEHICLES: {counts['vehicles']}"
+                count_label = f"PERSONS: {counts.get('persons', 0)} | VEHICLES: {counts.get('vehicles', 0)} | IN: {counts.get('entry', 0)} OUT: {counts.get('exit', 0)}"
                 cv2.putText(
                     annotated_frame,
                     count_label,
@@ -490,6 +491,7 @@ async def generate_file_stream(file_path: Path, overlay_label: str = "FEED"):
         cap = cv2.VideoCapture(str(file_path))
         fps = cap.get(cv2.CAP_PROP_FPS)
         delay = 1.0 / fps if fps and fps > 0 else 0.04
+        tracker = SpatialTracker()
 
         while True:
             ret, frame = cap.read()
@@ -508,10 +510,10 @@ async def generate_file_stream(file_path: Path, overlay_label: str = "FEED"):
                     await asyncio.sleep(0.5)
                     continue
 
-            # 1. Run AI Inference (YOLO11 Person & Vehicle Detection)
-            counts = {"persons": 0, "vehicles": 0}
+            # 1. Run AI Inference (YOLO11 ByteTrack & Tripwire)
+            counts = {"persons": 0, "vehicles": 0, "entry": 0, "exit": 0}
             try:
-                frame, counts = process_spatial_frame(frame)
+                frame, counts = tracker.process_frame(frame)
             except Exception:
                 pass  # Fail silently and keep streaming if AI throws an error
 
@@ -526,7 +528,7 @@ async def generate_file_stream(file_path: Path, overlay_label: str = "FEED"):
                 (16, 185, 129),
                 2,
             )
-            count_label = f"PERSONS: {counts['persons']} | VEHICLES: {counts['vehicles']}"
+            count_label = f"PERSONS: {counts.get('persons', 0)} | VEHICLES: {counts.get('vehicles', 0)} | IN: {counts.get('entry', 0)} OUT: {counts.get('exit', 0)}"
             cv2.putText(
                 frame,
                 count_label,

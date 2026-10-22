@@ -1,154 +1,209 @@
-"""
-UATU Vision Engine (Feature 1: Person Detection & Feature 2: Vehicle Detection)
-================================================================================
-Executes spatial object detection utilizing YOLO11 with CUDA GPU acceleration,
-identifying persons (COCO class 0) and vehicles (COCO classes 2, 3, 5, 7) in real time.
-"""
-
-import logging
-from pathlib import Path
-import sys
-from typing import Any, Dict, Optional, Tuple
-
 import cv2
+import os
+import logging
 import numpy as np
+from ultralytics import YOLO
 
-logger = logging.getLogger("workplace_intelligence.vision_engine")
-if not logger.handlers:
-    handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter(
-        "%(asctime)s [%(levelname)s] workplace_intelligence (vision_engine.py): %(message)s"
-    )
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Resolve local models path
-BASE_DIR = Path(__file__).resolve().parent.parent
-MODEL_PATH = BASE_DIR / "models" / "yolo11n.pt"
-
-# Class ID mappings for COCO dataset
-PERSON_CLASS_ID = 0
-VEHICLE_CLASS_IDS = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
-
-# Aesthetics styling: BGR Color tokens (Emerald green for persons, Cyan for vehicles)
-COLOR_PERSON = (16, 185, 129)   # Emerald Green
-COLOR_VEHICLE = (255, 200, 0)   # Vivid Cyan/Aqua (BGR)
-COLOR_BG_LABEL = (15, 23, 42)   # Deep Slate `#0f172a`
-
-# Global YOLO11 instance
-yolo_spatial_model: Optional[Any] = None
-device_name: str = "cpu"
-
-try:
-    from ultralytics import YOLO
-    import torch
-
-    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Loading YOLO11 spatial model from: {MODEL_PATH}")
-    yolo_spatial_model = YOLO(str(MODEL_PATH))
-
-    if torch.cuda.is_available():
-        device_name = "cuda:0"
-        yolo_spatial_model.to(device_name)
-        logger.info(f"YOLO11 spatial engine accelerated on CUDA GPU: {torch.cuda.get_device_name(0)}")
-    else:
-        device_name = "cpu"
-        logger.info("CUDA not detected. YOLO11 running on CPU fallback.")
-except Exception as e:
-    logger.warning(f"Could not initialize YOLO11 spatial engine: {e}")
+COLOR_TRIPWIRE = (0, 215, 255)
 
 
-def process_spatial_frame(frame: np.ndarray) -> Tuple[np.ndarray, Dict[str, int]]:
-    """
-    Evaluates an OpenCV BGR frame for Persons and Vehicles.
-    Draws minimalist bounding boxes and telemetry labels.
+class SpatialTracker:
+    def __init__(self, model=None):
+        if model is not None:
+            self.model = model
+        else:
+            # Safely locate and load the model
+            model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models", "yolo11n.pt"))
+            os.makedirs(os.path.dirname(model_path), exist_ok=True)
+            try:
+                self.model = YOLO(model_path)
+            except Exception as e:
+                logger.error(f"Error loading YOLO model at {model_path}: {e}")
+                self.model = None
 
-    Args:
-        frame: OpenCV image array (BGR format).
+        self.previous_y = {}
+        self.up_count = 0
+        self.down_count = 0
 
-    Returns:
-        tuple of (annotated_frame, {"persons": person_count, "vehicles": vehicle_count})
-    """
-    if frame is None or not isinstance(frame, np.ndarray):
-        return frame, {"persons": 0, "vehicles": 0}
+        # Compatibility aliases
+        self.entry_count = 0
+        self.exit_count = 0
+        self.track_history = {}
 
-    annotated = frame.copy()
-    counts = {"persons": 0, "vehicles": 0}
+    def process_frame(self, frame):
+        persons_count = 0
+        vehicles_count = 0
 
-    if yolo_spatial_model is None:
-        return annotated, counts
+        if frame is None or not isinstance(frame, np.ndarray):
+            return frame, {
+                "entry": self.down_count,
+                "exit": self.up_count,
+                "persons": 0,
+                "vehicles": 0,
+            }
 
-    try:
-        results = yolo_spatial_model(annotated, verbose=False)
-        for res in results:
-            if res.boxes is None or len(res.boxes) == 0:
-                continue
+        try:
+            height, width = frame.shape[:2]
+            line_y = int(height * 0.55)
 
-            for box in res.boxes:
-                cls_id = int(box.cls[0].item())
-                conf = float(box.conf[0].item())
+            # 1. Draw Tripwire First
+            cv2.line(frame, (0, line_y), (width, line_y), (0, 215, 255), 2)
+            cv2.putText(frame, "UATU TRIPWIRE", (10, line_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 215, 255), 2)
 
-                if conf < 0.35:
-                    continue
-
-                is_person = cls_id == PERSON_CLASS_ID
-                is_vehicle = cls_id in VEHICLE_CLASS_IDS
-
-                if not (is_person or is_vehicle):
-                    continue
-
-                if is_person:
-                    counts["persons"] += 1
-                    label_text = f"PERSON {conf:.2f}"
-                    box_color = COLOR_PERSON
+            # 2. Run Built-in Tracker (No custom YAML, no class limits)
+            active_model = self.model
+            if active_model is not None:
+                if hasattr(active_model, "track") and callable(getattr(active_model, "track")):
+                    track_out = active_model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False)
+                    results = track_out[0] if isinstance(track_out, (list, tuple)) else track_out
                 else:
-                    counts["vehicles"] += 1
-                    vehicle_name = VEHICLE_CLASS_IDS[cls_id].upper()
-                    label_text = f"{vehicle_name} {conf:.2f}"
-                    box_color = COLOR_VEHICLE
+                    call_out = active_model(frame, verbose=False)
+                    results = call_out[0] if isinstance(call_out, (list, tuple)) else call_out
+            else:
+                results = None
 
-                # Extract bounding coordinates
-                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+            if results is not None and getattr(results, "boxes", None) is not None:
+                boxes_obj = results.boxes
+                has_boxes = False
+                if isinstance(boxes_obj, list):
+                    has_boxes = len(boxes_obj) > 0
+                elif hasattr(boxes_obj, "xyxy") and hasattr(boxes_obj.xyxy, "__len__"):
+                    has_boxes = len(boxes_obj.xyxy) > 0
+                elif hasattr(boxes_obj, "__len__"):
+                    try:
+                        has_boxes = len(boxes_obj) > 0
+                    except TypeError:
+                        has_boxes = True
+                else:
+                    has_boxes = True
 
-                # Clamp to frame dimensions
-                h, w = annotated.shape[:2]
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(w - 1, x2), min(h - 1, y2)
+                if isinstance(boxes_obj, list):
+                    # Handle test mock list of boxes
+                    boxes = np.array([
+                        b.xyxy[0]
+                        if hasattr(b, "xyxy") and isinstance(b.xyxy, (list, tuple, np.ndarray))
+                        else getattr(b, "xyxy", [0, 0, 0, 0])
+                        for b in boxes_obj
+                    ])
+                    clss = np.array([
+                        b.cls[0].item()
+                        if hasattr(b, "cls") and hasattr(b.cls[0], "item")
+                        else getattr(b, "cls", 0)
+                        for b in boxes_obj
+                    ])
+                    confs = np.array([
+                        float(b.conf[0].item() if hasattr(b.conf[0], "item") else b.conf[0])
+                        if hasattr(b, "conf") and isinstance(b.conf, (list, tuple))
+                        else getattr(b, "conf", 1.0)
+                        for b in boxes_obj
+                    ])
+                    track_ids = [
+                        int(b.id.item())
+                        if hasattr(b, "id") and b.id is not None and hasattr(b.id, "item")
+                        else getattr(b, "id", None)
+                        for b in boxes_obj
+                    ]
+                else:
+                    xyxy = boxes_obj.xyxy
+                    boxes = xyxy.cpu().numpy() if hasattr(xyxy, "cpu") else np.array(xyxy)
+                    cls_arr = boxes_obj.cls
+                    if hasattr(cls_arr, "cpu"):
+                        clss = cls_arr.cpu().numpy()
+                    elif isinstance(cls_arr, (list, tuple)):
+                        clss = [c.item() if hasattr(c, "item") and callable(c.item) else c for c in cls_arr]
+                    else:
+                        clss = np.array(cls_arr)
 
-                # Draw minimalist thin bounding box
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), box_color, 2, cv2.LINE_AA)
+                    conf_arr = boxes_obj.conf
+                    if hasattr(conf_arr, "cpu"):
+                        confs = conf_arr.cpu().numpy()
+                    elif isinstance(conf_arr, (list, tuple)):
+                        confs = [c.item() if hasattr(c, "item") and callable(c.item) else c for c in conf_arr]
+                    else:
+                        confs = np.array(conf_arr)
 
-                # Small label with background tag
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                font_scale = 0.42
-                thickness = 1
-                (tw, th), baseline = cv2.getTextSize(label_text, font, font_scale, thickness)
+                    if getattr(boxes_obj, "id", None) is not None:
+                        id_arr = boxes_obj.id
+                        if hasattr(id_arr, "int"):
+                            id_arr = id_arr.int()
+                        if hasattr(id_arr, "cpu"):
+                            id_arr = id_arr.cpu()
+                        track_ids = id_arr.tolist() if hasattr(id_arr, "tolist") else list(id_arr)
+                    else:
+                        track_ids = [None] * len(boxes)
 
-                # Label tag placement
-                label_y1 = max(0, y1 - th - 6)
-                label_y2 = y1
-                label_x2 = min(w - 1, x1 + tw + 6)
+                for box, cls, conf, track_id in zip(boxes, clss, confs, track_ids):
+                    class_id = int(cls.item() if hasattr(cls, "item") else cls)
+                    conf_val = float(conf.item() if hasattr(conf, "item") else conf)
+                    if conf_val < 0.25:
+                        continue
 
-                cv2.rectangle(
-                    annotated,
-                    (x1, label_y1),
-                    (label_x2, label_y2),
-                    box_color,
-                    -1,
-                )
-                cv2.putText(
-                    annotated,
-                    label_text,
-                    (x1 + 3, label_y2 - 3),
-                    font,
-                    font_scale,
-                    COLOR_BG_LABEL,
-                    thickness,
-                    cv2.LINE_AA,
-                )
+                    # Persons (0) and Vehicles (2, 3, 5, 7)
+                    if class_id in [0, 2, 3, 5, 7]:
+                        if class_id == 0:
+                            persons_count += 1
+                        else:
+                            vehicles_count += 1
 
-    except Exception as e:
-        logger.warning(f"Error during spatial detection: {e}")
+                        x1, y1, x2, y2 = map(int, box)
+                        center_y = (y1 + y2) // 2
 
-    return annotated, counts
+                        is_person = (class_id == 0)
+                        color = (74, 222, 128) if is_person else (255, 215, 0)
+                        label = f"{'Person' if is_person else 'Vehicle'} {conf_val:.2f}"
+
+                        # ALWAYS draw the raw bounding box
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+                        # Apply Tracker ID & Math ONLY if tracker is locked on
+                        if track_id is not None:
+                            tid = int(track_id.item() if hasattr(track_id, "item") else track_id)
+                            label += f" | ID:{tid}"
+                            cv2.circle(frame, ((x1 + x2) // 2, center_y), 4, color, -1)
+
+                            old_y = self.previous_y.get(tid)
+                            if old_y is not None:
+                                if old_y < line_y <= center_y:
+                                    self.down_count += 1
+                                elif old_y > line_y >= center_y:
+                                    self.up_count += 1
+                            self.previous_y[tid] = center_y
+
+                        cv2.putText(frame, label, (x1, max(15, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+            # 3. Draw Clean Telemetry Box
+            cv2.rectangle(frame, (frame.shape[1] - 220, 10), (frame.shape[1] - 10, 50), (15, 23, 42), -1)
+            cv2.putText(
+                frame,
+                f"ENTRY: {self.down_count} | EXIT: {self.up_count}",
+                (frame.shape[1] - 210, 35),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2,
+            )
+
+        except Exception as e:
+            logger.error(f"AI Loop Crash: {e}")
+
+        # Sync compatibility aliases
+        self.entry_count = self.down_count
+        self.exit_count = self.up_count
+
+        return frame, {
+            "entry": self.down_count,
+            "exit": self.up_count,
+            "persons": persons_count,
+            "vehicles": vehicles_count,
+        }
+
+
+    def reset(self):
+        self.up_count = 0
+        self.down_count = 0
+        self.entry_count = 0
+        self.exit_count = 0
+        self.previous_y.clear()
+        self.track_history.clear()
