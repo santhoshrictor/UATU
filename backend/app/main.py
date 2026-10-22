@@ -508,7 +508,14 @@ async def generate_file_stream(file_path: Path, overlay_label: str = "FEED"):
                     await asyncio.sleep(0.5)
                     continue
 
-            # Overlay subtle telemetry header
+            # 1. Run AI Inference (YOLO11 Person & Vehicle Detection)
+            counts = {"persons": 0, "vehicles": 0}
+            try:
+                frame, counts = process_spatial_frame(frame)
+            except Exception:
+                pass  # Fail silently and keep streaming if AI throws an error
+
+            # 2. Overlay telemetry header and live object counts
             now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
             cv2.putText(
                 frame,
@@ -517,6 +524,16 @@ async def generate_file_stream(file_path: Path, overlay_label: str = "FEED"):
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.55,
                 (16, 185, 129),
+                2,
+            )
+            count_label = f"PERSONS: {counts['persons']} | VEHICLES: {counts['vehicles']}"
+            cv2.putText(
+                frame,
+                count_label,
+                (16, 52),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.50,
+                (255, 200, 0),
                 2,
             )
 

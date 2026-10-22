@@ -13,6 +13,7 @@ from backend.app.main import (
     yolo_model,
     EnrollRequest,
     VerifyAccessRequest,
+    generate_file_stream,
 )
 from backend.app.access_engine import (
     AccessCorrelationEngine,
@@ -32,6 +33,7 @@ __all__ = [
     "yolo_model",
     "EnrollRequest",
     "VerifyAccessRequest",
+    "generate_file_stream",
     "AccessCorrelationEngine",
     "access_engine",
     "evaluate_entry_event",

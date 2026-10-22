@@ -301,3 +301,21 @@ This document provides a permanent, auditable ledger of all file additions, conf
      - Created `backend/tests/test_vision_engine.py` verifying frame processing, empty/None handling, detection filtering, and bounding box drawing.
      - Full test suite passed: 19/19 tests (100%).
 - **Technical Justification:** Initiates automated spatial intelligence across the physical surveillance grid, equipping live camera channels with GPU-accelerated human and vehicle localization without introducing frame drops or DirectShow lock contention.
+
+---
+
+#### 2026-10-22 14:26:00
+- **File Path:** `backend/app/main.py`, `backend/main.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `UPDATE`
+- **Summary:** Wired YOLO11 spatial inference engine into the video file streaming loop (`generate_file_stream`):
+  1. **Video File Inference Integration:**
+     - Connected `process_spatial_frame` directly into the `generate_file_stream()` generator loop immediately following `cap.read()`.
+     - Wrapped inference in a graceful try/except block to safeguard video stream continuity against frame decoding or inference exceptions.
+     - Automatically renders Emerald Green bounding boxes for Persons (COCO 0) and Vivid Cyan bounding boxes for Vehicles (COCO 2, 3, 5, 7) on all uploaded sample files (`/api/custom-stream/{video_id}`) and default loops (`/api/video-stream`).
+     - Added live telemetry counter overlay (`PERSONS: {count} | VEHICLES: {count}`) directly beneath the feed title in the top-left corner.
+  2. **Root Entry Point Export (`backend/main.py`):**
+     - Exported `generate_file_stream` in `backend/main.py` `__all__` for unified modular access.
+  3. **Verification & Testing:**
+     - Verified with full pytest test suite; all 19 tests passed (100%).
+     - Restarted FastAPI Uvicorn background daemon on port 8000; health readiness verified.
+- **Technical Justification:** Ensures parity between live hardware webcam feeds and uploaded/imported CCTV sample video streams, allowing operators to run spatial person and vehicle localization across archived and uploaded media without bypass.
