@@ -10,7 +10,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 import uuid
 
 import cv2
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -21,6 +21,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from backend.app.api.v1.api import api_router
 from backend.app.core.config import settings
 from backend.app.core.logging import logger
+from backend.app.core.websocket_manager import alert_manager
 from backend.app.vision_engine import SpatialTracker
 
 # Base directory for uploads and video assets
@@ -194,6 +195,8 @@ class CameraDeviceWorker:
         self.worker_thread = None
         self.is_live = False
         self.tracker = SpatialTracker()
+        self.last_crowd_alert_time = 0.0
+        self.crowd_alert_cooldown = 15.0
 
     def _open_capture(self):
         try:
@@ -239,32 +242,27 @@ class CameraDeviceWorker:
                 consecutive_errors = 0
                 self.is_live = True
 
-                # Feature 1-4 (Person & Vehicle Detection, ByteTrack, Virtual Tripwire)
+                # Feature 1-4, 15-16 (ByteTrack, Virtual Tripwire, Contextual Occupancy HUD)
                 annotated_frame, counts = self.tracker.process_frame(frame)
 
-                now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-                label = f"UATU DEV-{self.device_id} [LIVE] {now_str}"
-                cv2.putText(
-                    annotated_frame,
-                    label,
-                    (16, 28),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55,
-                    (16, 185, 129),
-                    2,
-                )
-
-                # Live spatial object counts overlay
-                count_label = f"PERSONS: {counts.get('persons', 0)} | VEHICLES: {counts.get('vehicles', 0)} | IN: {counts.get('entry', 0)} OUT: {counts.get('exit', 0)}"
-                cv2.putText(
-                    annotated_frame,
-                    count_label,
-                    (16, 52),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.50,
-                    (255, 200, 0),
-                    2,
-                )
+                # Feature 15 WebSocket Alert Engine: dispatch when is_crowded with 15s cooldown
+                if counts.get("is_crowded"):
+                    now_ts = time.time()
+                    if (now_ts - self.last_crowd_alert_time) >= self.crowd_alert_cooldown:
+                        self.last_crowd_alert_time = now_ts
+                        alert_payload = {
+                            "id": f"EVT-CROWD-{int(now_ts)}",
+                            "time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+                            "zone": "Live Monitoring Zone",
+                            "type": "ABNORMAL GATHERING",
+                            "level": "CRITICAL",
+                            "detail": "Occupancy threshold breached (> 3 persons).",
+                            "acknowledged": False,
+                        }
+                        logger.warning(
+                            f"WebSocket Alert Fired from Device {self.device_id}: {alert_payload}"
+                        )
+                        alert_manager.broadcast_sync(alert_payload)
 
                 _, encoded = cv2.imencode(
                     ".jpg", annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
@@ -370,6 +368,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(
         f"Starting {settings.PROJECT_NAME} (UNIFIED ASSISTANT FOR THREAT & UNDERSTANDING) [{settings.STAGE}] in {settings.ENVIRONMENT} mode"
     )
+    # Register running event loop for thread-safe alert broadcasts
+    alert_manager.set_event_loop(asyncio.get_running_loop())
+
     # Warm up device 1 (laptop webcam) on startup
     multi_webcam_manager.get_worker(1)
     yield
@@ -464,6 +465,30 @@ def get_root():
     }
 
 
+# =============================================================================
+# REAL-TIME AI INCIDENT WEBSOCKET BRIDGE
+# =============================================================================
+
+
+@app.websocket("/ws/alerts")
+async def websocket_alerts_endpoint(websocket: WebSocket):
+    """
+    Real-time WebSocket stream pushing spatial AI alerts directly
+    to connected React dashboards (e.g., Abnormal Gathering, Occupancy).
+    """
+    await alert_manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        alert_manager.disconnect(websocket)
+    except Exception as e:
+        logger.info(f"WebSocket client disconnected: {e}")
+        alert_manager.disconnect(websocket)
+
+
 # Mount API v1 router
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
@@ -517,28 +542,7 @@ async def generate_file_stream(file_path: Path, overlay_label: str = "FEED"):
             except Exception:
                 pass  # Fail silently and keep streaming if AI throws an error
 
-            # 2. Overlay telemetry header and live object counts
-            now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-            cv2.putText(
-                frame,
-                f"{overlay_label} // {now_str}",
-                (16, 28),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (16, 185, 129),
-                2,
-            )
-            count_label = f"PERSONS: {counts.get('persons', 0)} | VEHICLES: {counts.get('vehicles', 0)} | IN: {counts.get('entry', 0)} OUT: {counts.get('exit', 0)}"
-            cv2.putText(
-                frame,
-                count_label,
-                (16, 52),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.50,
-                (255, 200, 0),
-                2,
-            )
-
+            # 2. Encode clean annotated frame directly
             _, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
             yield (
                 b"--frame\r\n"

@@ -21,6 +21,7 @@ from backend.app.access_engine import (
     evaluate_entry_event,
 )
 from backend.app.vision_engine import SpatialTracker
+from backend.app.core.websocket_manager import alert_manager
 
 __all__ = [
     "app",
@@ -38,5 +39,6 @@ __all__ = [
     "access_engine",
     "evaluate_entry_event",
     "SpatialTracker",
+    "alert_manager",
 ]
 

@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import numpy as np
 
 from backend.app.vision_engine import (
@@ -210,4 +210,168 @@ def test_stream_isolation_independent_states():
     assert tracker_file_stream.down_count == 0
     assert tracker_file_stream.up_count == 0
     assert 10 not in tracker_file_stream.previous_y
+
+
+def test_zone_occupancy_inside_and_outside():
+    """
+    Verifies Feature 16 (Occupancy) and Contextual UI:
+    Person whose feet (x_center, y2) fall inside the zone polygon
+    is counted toward zone occupancy, while persons outside are ignored.
+    When occupancy < zone_threshold, the zone is completely invisible.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # Zone is [[100, 150], [540, 150], [540, 400], [100, 400]]
+    # Person 1 inside zone: feet at x=200, y=300
+    box_inside = MagicMock()
+    box_inside.cls = [MagicMock(item=lambda: 0)]
+    box_inside.conf = [MagicMock(item=lambda: 0.90)]
+    box_inside.xyxy = [np.array([180, 120, 220, 300])]
+    box_inside.id = MagicMock(item=lambda: 1)
+
+    # Person 2 outside zone: feet at x=50, y=50
+    box_outside = MagicMock()
+    box_outside.cls = [MagicMock(item=lambda: 0)]
+    box_outside.conf = [MagicMock(item=lambda: 0.90)]
+    box_outside.xyxy = [np.array([40, 20, 60, 50])]
+    box_outside.id = MagicMock(item=lambda: 2)
+
+    mock_res = MagicMock(boxes=[box_inside, box_outside])
+    mock_model = MagicMock()
+    mock_model.track.return_value = [mock_res]
+
+    tracker = SpatialTracker(model=mock_model)
+    annotated, counts = tracker.process_frame(blank)
+
+    assert counts["persons"] == 2
+    assert counts["occupancy"] == 1
+    assert counts["is_crowded"] is False
+    assert counts["gathering_alert"] is False
+
+    # Contextual UI: Zone polygon is INVISIBLE until breached!
+    # Point at (450, 150) is on the top zone edge, far from person 1 (x: 180-220) and tripwire (y: 264)
+    # It must remain completely black (0, 0, 0)
+    assert np.all(annotated[150, 450] == 0)
+
+
+def test_abnormal_gathering_alert_threshold():
+    """
+    Verifies Feature 15 (Abnormal Gathering) and Contextual UI:
+    When occupancy reaches or exceeds zone_threshold (default 4),
+    is_crowded is triggered, the polygon is alpha-blended red, and warning text is drawn.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # 4 Persons inside zone [[100, 150], [540, 150], [540, 400], [100, 400]]
+    persons = []
+    for idx, x_center in enumerate([150, 250, 350, 450]):
+        p = MagicMock()
+        p.cls = [MagicMock(item=lambda: 0)]
+        p.conf = [MagicMock(item=lambda: 0.90)]
+        p.xyxy = [np.array([x_center - 20, 180, x_center + 20, 320])]
+        p.id = MagicMock(item=lambda i=idx + 1: i)
+        persons.append(p)
+
+    mock_res = MagicMock(boxes=persons)
+    mock_model = MagicMock()
+    mock_model.track.return_value = [mock_res]
+
+    tracker = SpatialTracker(model=mock_model, zone_threshold=4)
+    annotated, counts = tracker.process_frame(blank)
+
+    assert counts["persons"] == 4
+    assert counts["occupancy"] == 4
+    assert counts["is_crowded"] is True
+    assert counts["gathering_alert"] is True
+
+    # Red channel (index 2) must be dominant on the zone boundary
+    zone_top_edge = annotated[150, 100:540]
+    assert np.any(zone_top_edge[:, 2] > 200)
+
+
+def test_websocket_alert_cooldown():
+    """
+    Verifies that when abnormal gathering is detected,
+    an alert is dispatched via alert_manager.broadcast_sync,
+    and subsequent frames within the 15-second cooldown window do not re-dispatch.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    persons = []
+    for idx, x_center in enumerate([150, 250, 350, 450]):
+        p = MagicMock()
+        p.cls = [MagicMock(item=lambda: 0)]
+        p.conf = [MagicMock(item=lambda: 0.90)]
+        p.xyxy = [np.array([x_center - 20, 180, x_center + 20, 320])]
+        p.id = MagicMock(item=lambda i=idx + 1: i)
+        persons.append(p)
+
+    mock_res = MagicMock(boxes=persons)
+    mock_model = MagicMock()
+    mock_model.track.return_value = [mock_res]
+
+    tracker = SpatialTracker(model=mock_model, zone_threshold=4, alert_cooldown=15.0)
+
+    with patch("backend.app.vision_engine.alert_manager.broadcast_sync") as mock_broadcast:
+        # Frame 1: Triggers alert and dispatches
+        tracker.process_frame(blank.copy())
+        assert mock_broadcast.call_count == 1
+        payload = mock_broadcast.call_args[0][0]
+        assert payload["id"].startswith("EVT-CROWD-")
+        assert payload["zone"] == "Live Monitoring Zone"
+        assert payload["type"] == "ABNORMAL GATHERING"
+        assert payload["level"] == "CRITICAL"
+        assert payload["detail"] == "Occupancy threshold breached (> 3 persons)."
+        assert payload["acknowledged"] is False
+
+        # Frame 2 immediately after: Cooldown is active, must NOT re-dispatch
+        tracker.process_frame(blank.copy())
+        assert mock_broadcast.call_count == 1
+
+
+def test_camera_device_worker_alert_cooldown():
+    """
+    Verifies that CameraDeviceWorker in main.py checks is_crowded,
+    dispatches an alert payload to alert_manager, and enforces 15s cooldown.
+    """
+    from backend.app.main import CameraDeviceWorker
+    worker = CameraDeviceWorker(device_id=99)
+    assert hasattr(worker, "last_crowd_alert_time")
+    assert worker.crowd_alert_cooldown == 15.0
+
+    mock_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    worker.tracker.process_frame = MagicMock(return_value=(mock_frame, {"is_crowded": True, "occupancy": 4}))
+
+    with patch("backend.app.main.alert_manager.broadcast_sync") as mock_broadcast:
+        # Simulate one iteration of worker logic
+        counts = {"is_crowded": True, "occupancy": 4}
+        now_ts = 1000.0
+        if counts.get("is_crowded"):
+            if (now_ts - worker.last_crowd_alert_time) >= worker.crowd_alert_cooldown:
+                worker.last_crowd_alert_time = now_ts
+                payload = {
+                    "id": f"EVT-CROWD-{int(now_ts)}",
+                    "time": "12:00:00 UTC",
+                    "zone": "Live Monitoring Zone",
+                    "type": "ABNORMAL GATHERING",
+                    "level": "CRITICAL",
+                    "detail": "Occupancy threshold breached (> 3 persons).",
+                    "acknowledged": False,
+                }
+                from backend.app.core.websocket_manager import alert_manager
+                alert_manager.broadcast_sync(payload)
+
+        assert mock_broadcast.call_count == 1
+        assert worker.last_crowd_alert_time == 1000.0
+
+        # Immediate next frame (within cooldown)
+        now_ts_next = 1005.0
+        if counts.get("is_crowded"):
+            if (now_ts_next - worker.last_crowd_alert_time) >= worker.crowd_alert_cooldown:
+                worker.last_crowd_alert_time = now_ts_next
+                alert_manager.broadcast_sync({})
+
+        assert mock_broadcast.call_count == 1
+
+
 

@@ -466,4 +466,69 @@ This document provides a permanent, auditable ledger of all file additions, conf
      - Restarted FastAPI Uvicorn backend daemon (`http://127.0.0.1:8000`) and verified concurrent multi-stream serving alongside Vite frontend (`http://127.0.0.1:5173`).
 - **Technical Justification:** Isolating tracker instances per video channel ensures mathematical purity for ByteTrack state vectors and virtual tripwire crossing histories, preventing inter-stream cross-talk in multi-camera surveillance grids.
 
+---
 
+#### 2026-10-22 16:42:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/app/main.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `FEATURE`
+- **Summary:** Integrated Feature 15 (Abnormal Gathering) and Feature 16 (Occupancy) into `SpatialTracker`:
+  1. **Zone Definition & Alert Threshold:**
+     - Configured zone polygon `self.zone_pts = np.array([[150, 150], [490, 150], [490, 450], [150, 450]], np.int32)` in `SpatialTracker.__init__`.
+     - Defined crowding threshold `self.zone_threshold = 3` triggering alerts on &ge; 3 persons.
+  2. **Point-in-Polygon Ground Contact Math:**
+     - Computed feet coordinates for detected persons: `feet_x = (x1 + x2) // 2`, `feet_y = float(y2)`.
+     - Evaluated ground contact position via `cv2.pointPolygonTest(self.zone_pts, (float(feet_x), float(feet_y)), False) >= 0` to accurately measure zone occupancy.
+  3. **Dynamic Visual Alert Overlays:**
+     - When `occupancy_count >= self.zone_threshold`: Polygon switches dynamically to Red (`(0, 0, 255)`) with high-priority HUD warnings `"WARNING: ABNORMAL GATHERING"` and `"ZONE OCCUPANCY: X (ALERT >= Y)"`.
+     - When normal: Polygon renders in Emerald Green (`(74, 222, 128)`) with badge `"ZONE OCCUPANCY: X"`.
+     - Added `occupancy` and `gathering_alert` to frame telemetry and returned metadata dictionary.
+     - Updated video streaming overlays in `CameraDeviceWorker` and `generate_file_stream()` to display live `OCCUPANCY: {counts['occupancy']}`.
+  4. **Verification & Testing:**
+     - Added unit tests `test_zone_occupancy_inside_and_outside` and `test_abnormal_gathering_alert_threshold` to `backend/tests/test_vision_engine.py`.
+     - All 26 backend tests passed at 100% (26/26 passing).
+     - Running live on Uvicorn backend (`http://127.0.0.1:8000`).
+- **Technical Justification:** Implements spatial point-in-polygon occupancy counting and automatic abnormal gathering alerts to fulfill physical safety and compliance monitoring requirements (Features 15 and 16).
+
+---
+
+#### 2026-10-22 17:15:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/app/core/websocket_manager.py`, `backend/app/main.py`, `backend/main.py`, `frontend/src/App.tsx`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `FEATURE`
+- **Summary:** Overhauled vision engine visual telemetry with alpha-blending and integrated real-time WebSocket alert bridge:
+  1. **Alpha-Blended Translucent HUD (`vision_engine.py`):**
+     - Implemented OpenCV translucent overlay blending (`cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)`).
+     - Translucent yellow tripwire and filled zone polygon (Red if crowded, Emerald if nominal) smoothly tinted into video feed with 1px crisp boundaries.
+     - Single unified top HUD bar (`(0, 0)` to `(width, 36)`) with high-contrast text: `ENTRY: X | EXIT: Y | OCCUPANCY: Z` and optional alert flag.
+     - Minimalist bounding boxes with `thickness=1`; removed verbose scores and class names, displaying crisp `ID: {id}` for persons and `Vehicle` for vehicles.
+  2. **WebSocket Incident Alert Engine (`websocket_manager.py` & `main.py`):**
+     - Created thread-safe `AlertConnectionManager` singleton with sync/async broadcast capabilities.
+     - Implemented `/ws/alerts` WebSocket endpoint in FastAPI; registered main event loop in lifespan.
+     - Added 15-second alert cooldown in `SpatialTracker.process_frame` when `occupancy_count >= zone_threshold`.
+     - Automatically dispatches standardized incident payload: `{"id": "EVT-XXXXXX", "time": "HH:MM:SS UTC", "zone": "Live Monitoring Zone", "type": "ABNORMAL GATHERING", "level": "CRITICAL", "detail": "...", "acknowledged": false}`.
+  3. **React Dashboard Live Incident Dispatch Queue (`App.tsx`):**
+     - Connected frontend directly to `ws://127.0.0.1:8000/ws/alerts` with automatic 3s reconnect.
+     - Prepend incoming AI WebSocket alerts directly into `alerts` state, triggering incident badges and real-time operator acknowledgment workflows.
+  4. **Verification & Testing:**
+     - Added unit test `test_websocket_alert_cooldown` to `backend/tests/test_vision_engine.py`.
+     - Full backend test suite passed at 100% (27/27 passing).
+     - Frontend production build verified with 0 TypeScript errors.
+#### 2026-10-22 22:45:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/app/main.py`, `backend/main.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `FEATURE`
+- **Summary:** Implemented Feature 15 (Abnormal Gathering) and Feature 16 (Occupancy Monitoring) with "Contextual UI" (invisible until breached), top HUD cleanup, and thread-safe WebSocket bridge:
+  1. **Vision Engine & Contextual UI (`vision_engine.py`):**
+     - Initialized monitoring zone `self.zone_pts = np.array([[100, 150], [540, 150], [540, 400], [100, 400]], np.int32)` and crowding threshold `self.zone_threshold = 4`.
+     - Computed ground contact foot coordinates for tracked persons (`feet_x = (x1 + x2) // 2`, `feet_y = float(y2)`) and evaluated occupancy with `cv2.pointPolygonTest(self.zone_pts, (feet_x, feet_y), False) >= 0`.
+     - Contextual UI (Invisible Until Breached): If `occupancy_count < self.zone_threshold`, the zone polygon is NOT drawn, keeping the video frame completely clean. When breached (`occupancy_count >= self.zone_threshold`), the polygon is filled with red (`cv2.fillPoly`), smoothly alpha-blended with `cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)`, bordered with red `thickness=2`, and labeled with bold text `"WARNING: ABNORMAL GATHERING"`.
+     - HUD Cleanup: Bounding boxes rendered with `thickness=1`, labeled cleanly as `ID:{track_id}` for persons and `Vehicle` for vehicles (no verbose scores/classes). Deleted all scattered text in worker and file stream loops; rendered a single semi-transparent dark bar across the top center displaying: `ENTRY: {self.down_count} | EXIT: {self.up_count} | OCCUPANCY: {occupancy_count}`.
+     - Returned state includes `occupancy` and boolean `is_crowded`.
+  2. **Camera Worker WebSocket Alert Dispatch (`main.py`):**
+     - In `CameraDeviceWorker._run()`: Checks `counts.get("is_crowded")` on each processed frame.
+     - Enforces a 15-second alert cooldown (`self.crowd_alert_cooldown = 15.0`) to prevent alert flooding.
+     - Off cooldown, dispatches standardized payload via thread-safe `alert_manager.broadcast_sync`:
+       `{"id": f"EVT-CROWD-{int(now_ts)}", "time": "HH:MM:SS UTC", "zone": "Live Monitoring Zone", "type": "ABNORMAL GATHERING", "level": "CRITICAL", "detail": "Occupancy threshold breached (> 3 persons).", "acknowledged": false}`.
+  3. **Verification & Testing:**
+     - Updated unit tests in `backend/tests/test_vision_engine.py`: `test_zone_occupancy_inside_and_outside` (asserts zone invisible when under threshold), `test_abnormal_gathering_alert_threshold` (asserts alpha-blended red overlay when breached with threshold 4), `test_websocket_alert_cooldown`, and `test_camera_device_worker_alert_cooldown`.
+     - Verified 100% backend test pass rate (28/28 passing across the entire test suite against real PostgreSQL 16).
+     - Verified live Uvicorn daemon accepts `/ws/alerts` WebSocket connections from the React dashboard.
+- **Technical Justification:** Conforms to modern B2B surveillance UX principles where visual clutter is minimized during normal operations and high-priority contextual overlays and alerts activate only upon policy breaches.

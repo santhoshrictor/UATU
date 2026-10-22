@@ -1,8 +1,13 @@
 import cv2
 import os
+import time
+import uuid
 import logging
+from datetime import datetime, timezone
 import numpy as np
 from ultralytics import YOLO
+
+from backend.app.core.websocket_manager import alert_manager
 
 logger = logging.getLogger(__name__)
 
@@ -10,7 +15,7 @@ COLOR_TRIPWIRE = (0, 215, 255)
 
 
 class SpatialTracker:
-    def __init__(self, model=None):
+    def __init__(self, model=None, zone_pts=None, zone_threshold=4, alert_cooldown=15.0):
         if model is not None:
             self.model = model
         else:
@@ -32,9 +37,21 @@ class SpatialTracker:
         self.exit_count = 0
         self.track_history = {}
 
+        # Feature 15 & 16: Zone definition and Crowding/Occupancy threshold
+        self.zone_threshold = zone_threshold
+        if zone_pts is not None:
+            self.zone_pts = np.array(zone_pts, np.int32)
+        else:
+            self.zone_pts = np.array([[100, 150], [540, 150], [540, 400], [100, 400]], np.int32)
+
+        # Alert cooldown tracking (Feature 15 WebSocket alerts)
+        self.alert_cooldown = alert_cooldown
+        self.last_alert_time = 0.0
+
     def process_frame(self, frame):
         persons_count = 0
         vehicles_count = 0
+        occupancy_count = 0
 
         if frame is None or not isinstance(frame, np.ndarray):
             return frame, {
@@ -42,17 +59,17 @@ class SpatialTracker:
                 "exit": self.up_count,
                 "persons": 0,
                 "vehicles": 0,
+                "occupancy": 0,
+                "occupancy_count": 0,
+                "is_crowded": False,
+                "gathering_alert": False,
             }
 
         try:
             height, width = frame.shape[:2]
             line_y = int(height * 0.55)
 
-            # 1. Draw Tripwire First
-            cv2.line(frame, (0, line_y), (width, line_y), (0, 215, 255), 2)
-            cv2.putText(frame, "UATU TRIPWIRE", (10, line_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 215, 255), 2)
-
-            # 2. Run Built-in Tracker (No custom YAML, no class limits)
+            # 1. Run Built-in Tracker (No custom YAML, no class limits)
             active_model = self.model
             if active_model is not None:
                 if hasattr(active_model, "track") and callable(getattr(active_model, "track")):
@@ -64,6 +81,7 @@ class SpatialTracker:
             else:
                 results = None
 
+            parsed_boxes = []
             if results is not None and getattr(results, "boxes", None) is not None:
                 boxes_obj = results.boxes
                 has_boxes = False
@@ -142,27 +160,23 @@ class SpatialTracker:
 
                     # Persons (0) and Vehicles (2, 3, 5, 7)
                     if class_id in [0, 2, 3, 5, 7]:
-                        if class_id == 0:
+                        x1, y1, x2, y2 = map(int, box)
+                        center_y = (y1 + y2) // 2
+                        is_person = (class_id == 0)
+
+                        if is_person:
                             persons_count += 1
+                            feet_x = (x1 + x2) // 2
+                            feet_y = float(y2)
+                            if cv2.pointPolygonTest(self.zone_pts, (float(feet_x), float(feet_y)), False) >= 0:
+                                occupancy_count += 1
                         else:
                             vehicles_count += 1
 
-                        x1, y1, x2, y2 = map(int, box)
-                        center_y = (y1 + y2) // 2
-
-                        is_person = (class_id == 0)
-                        color = (74, 222, 128) if is_person else (255, 215, 0)
-                        label = f"{'Person' if is_person else 'Vehicle'} {conf_val:.2f}"
-
-                        # ALWAYS draw the raw bounding box
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
-                        # Apply Tracker ID & Math ONLY if tracker is locked on
+                        # Track ID & Line-Crossing Math
+                        tid = None
                         if track_id is not None:
                             tid = int(track_id.item() if hasattr(track_id, "item") else track_id)
-                            label += f" | ID:{tid}"
-                            cv2.circle(frame, ((x1 + x2) // 2, center_y), 4, color, -1)
-
                             old_y = self.previous_y.get(tid)
                             if old_y is not None:
                                 if old_y < line_y <= center_y:
@@ -171,19 +185,98 @@ class SpatialTracker:
                                     self.up_count += 1
                             self.previous_y[tid] = center_y
 
-                        cv2.putText(frame, label, (x1, max(15, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                        parsed_boxes.append((x1, y1, x2, y2, center_y, is_person, tid))
 
-            # 3. Draw Clean Telemetry Box
-            cv2.rectangle(frame, (frame.shape[1] - 220, 10), (frame.shape[1] - 10, 50), (15, 23, 42), -1)
+            is_crowded = (occupancy_count >= self.zone_threshold)
+
+            # 2. Contextual UI & Alpha-Blended Overlays
+            overlay = frame.copy()
+
+            # Translucent Tripwire
+            cv2.line(overlay, (0, line_y), (width, line_y), (0, 215, 255), 2)
+
+            # Single semi-transparent dark bar across top
+            cv2.rectangle(overlay, (0, 0), (width, 36), (15, 23, 42), -1)
+
+            # Contextual UI: Polygon is INVISIBLE until breached!
+            if is_crowded:
+                cv2.fillPoly(overlay, [self.zone_pts], (0, 0, 255))
+
+            # Blend smoothly into frame
+            cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
+
+            # Crisp tripwire line
+            cv2.line(frame, (0, line_y), (width, line_y), (0, 215, 255), 1)
+
+            # If breached, render crisp red boundary and bold warning
+            if is_crowded:
+                cv2.polylines(frame, [self.zone_pts], isClosed=True, color=(0, 0, 255), thickness=2)
+                cv2.putText(
+                    frame,
+                    "WARNING: ABNORMAL GATHERING",
+                    (self.zone_pts[0][0], max(25, self.zone_pts[0][1] - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+            # 3. Minimalist Bounding Boxes (thickness=1, clean IDs, no verbose class/scores)
+            for x1, y1, x2, y2, center_y, is_person, tid in parsed_boxes:
+                color = (74, 222, 128) if is_person else (255, 215, 0)
+                # Bounding box thickness = 1
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
+
+                if is_person:
+                    label = f"ID:{tid}" if tid is not None else "Person"
+                    if tid is not None:
+                        cv2.circle(frame, ((x1 + x2) // 2, center_y), 3, color, -1)
+                else:
+                    label = "Vehicle"
+
+                cv2.putText(
+                    frame,
+                    label,
+                    (x1, max(12, y1 - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    color,
+                    1,
+                    cv2.LINE_AA,
+                )
+
+            # 4. Unified Top HUD Text across top center
+            hud_text = f"ENTRY: {self.down_count} | EXIT: {self.up_count} | OCCUPANCY: {occupancy_count}"
+            (tw, th), _ = cv2.getTextSize(hud_text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+            text_x = max(16, (width - tw) // 2)
             cv2.putText(
                 frame,
-                f"ENTRY: {self.down_count} | EXIT: {self.up_count}",
-                (frame.shape[1] - 210, 35),
+                hud_text,
+                (text_x, 24),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
+                0.55,
                 (255, 255, 255),
-                2,
+                1,
+                cv2.LINE_AA,
             )
+
+            # 5. Alert Trigger & 15s Cooldown WebSocket Dispatch
+            if is_crowded:
+                now_ts = time.time()
+                if (now_ts - self.last_alert_time) >= self.alert_cooldown:
+                    self.last_alert_time = now_ts
+                    alert_payload = {
+                        "id": f"EVT-CROWD-{int(now_ts)}",
+                        "time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+                        "zone": "Live Monitoring Zone",
+                        "type": "ABNORMAL GATHERING",
+                        "level": "CRITICAL",
+                        "detail": "Occupancy threshold breached (> 3 persons).",
+                        "acknowledged": False,
+                    }
+                    logger.warning(f"WebSocket Alert Fired: {alert_payload}")
+                    alert_manager.broadcast_sync(alert_payload)
 
         except Exception as e:
             logger.error(f"AI Loop Crash: {e}")
@@ -197,8 +290,11 @@ class SpatialTracker:
             "exit": self.up_count,
             "persons": persons_count,
             "vehicles": vehicles_count,
+            "occupancy": occupancy_count,
+            "occupancy_count": occupancy_count,
+            "is_crowded": is_crowded,
+            "gathering_alert": is_crowded,
         }
-
 
     def reset(self):
         self.up_count = 0
@@ -207,3 +303,5 @@ class SpatialTracker:
         self.exit_count = 0
         self.previous_y.clear()
         self.track_history.clear()
+        self.last_alert_time = 0.0
+

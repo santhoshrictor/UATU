@@ -335,6 +335,71 @@ export const App: React.FC = () => {
   }, [focusedCameraId, selectedCamForConfig, showEnrollModal]);
 
   /* -----------------------------------------------------------------------
+     2b. Real-time AI Incident WebSocket Bridge (/ws/alerts)
+     ----------------------------------------------------------------------- */
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let isDisposed = false;
+
+    const connectAlertWs = () => {
+      try {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.hostname || '127.0.0.1';
+        const wsUrl = `${protocol}//${host}:8000/ws/alerts`;
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+          console.log('[UATU Alert Bridge] Connected to WebSocket alert stream:', wsUrl);
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data && data.type) {
+              const incomingAlert: IncidentAlert = {
+                id: data.id || `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
+                timestamp: data.time || data.timestamp || formatUtcTime(),
+                zone: data.zone || 'Live Monitoring Zone',
+                type: data.type,
+                severity: (data.level || data.severity || 'CRITICAL') as AlertSeverity,
+                detail: data.detail || 'Spatial AI alert triggered by computer vision engine.',
+                acknowledged: false,
+                eventRef: data.id,
+              };
+              setAlerts((prev) => [incomingAlert, ...prev]);
+            }
+          } catch (err) {
+            console.error('[UATU Alert Bridge] Error parsing WebSocket message:', err);
+          }
+        };
+
+        ws.onclose = () => {
+          if (!isDisposed) {
+            reconnectTimer = setTimeout(connectAlertWs, 3000);
+          }
+        };
+
+        ws.onerror = () => {
+          ws?.close();
+        };
+      } catch (err) {
+        if (!isDisposed) {
+          reconnectTimer = setTimeout(connectAlertWs, 3000);
+        }
+      }
+    };
+
+    connectAlertWs();
+
+    return () => {
+      isDisposed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) ws.close();
+    };
+  }, []);
+
+  /* -----------------------------------------------------------------------
      3. Stream Reconnect / Recovery Timer (Ticks every 3s on error)
      ----------------------------------------------------------------------- */
   useEffect(() => {
