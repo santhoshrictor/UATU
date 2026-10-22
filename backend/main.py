@@ -10,6 +10,14 @@ from backend.app.main import (
     get_working_camera,
     get_webcam_manager,
     webcam_manager,
+    yolo_model,
+    EnrollRequest,
+    VerifyAccessRequest,
+)
+from backend.app.access_engine import (
+    AccessCorrelationEngine,
+    access_engine,
+    evaluate_entry_event,
 )
 
 __all__ = [
@@ -20,4 +28,11 @@ __all__ = [
     "get_working_camera",
     "get_webcam_manager",
     "webcam_manager",
+    "yolo_model",
+    "EnrollRequest",
+    "VerifyAccessRequest",
+    "AccessCorrelationEngine",
+    "access_engine",
+    "evaluate_entry_event",
 ]
+

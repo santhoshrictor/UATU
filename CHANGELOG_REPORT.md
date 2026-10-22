@@ -161,3 +161,120 @@ This document provides a permanent, auditable ledger of all file additions, conf
      ```
   3. **Remote Configuration & Push:** Linked remote origin to `https://github.com/santhoshrictor/UATU.git`, switched branch to `main`, and pushed lightweight codebase.
 - **Technical Justification:** Prevents accidental tracking of bulky local development dependencies, local database files, and heavy AI weights, reducing the remote git footprint to a lightweight, source-only payload.
+
+---
+
+#### 2026-10-22 11:25:00
+- **File Path:** `backend/app/access_engine.py`, `backend/main.py`, `backend/tests/test_access_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `CREATE`
+- **Summary:** Created the UATU Access Control & Biometric Correlation AI module (`backend/app/access_engine.py`) for processing physical RFID scans alongside live visual surveillance frames:
+  1. **GPU-Accelerated Model Initialization:**
+     - Configured hardware capability detection targeting NVIDIA CUDA (`device='cuda:0'` for PyTorch/YOLO and `providers=['CUDAExecutionProvider', 'CPUExecutionProvider']` for ONNX Runtime/InsightFace).
+     - Defined local model loading paths targeting `backend/models/` for YOLO (`yolov8n.pt`/`yolo11n.pt`) and ArcFace (`buffalo_l`).
+  2. **Core Entry Evaluation Pipeline (`evaluate_entry_event`):**
+     - **Step 1 (YOLO Spatial Occupancy):** Detects persons (`class 0`) in the optical turnstile zone and extracts bounding boxes `[x1, y1, x2, y2, confidence]`. If `person_count > 1`, immediately escalates to `status="TAILGATING"`.
+     - **Step 2 (InsightFace / ArcFace Cosine Match):** Extracts 512-dimensional facial feature vectors from live frames and computes normalized cosine similarity against enrolled credential vectors.
+     - **Step 3 (Telemetry Payload):** Returns standardized JSON dictionary containing `status` (`AUTHORIZED`, `MISMATCH`, or `TAILGATING`), `match_score_pct`, `person_count`, `bounding_boxes`, `scanned_rfid`, and execution telemetry.
+  3. **Development Fallback & Simulation Safety:**
+     - Wrapped model loading in protective try/except blocks. When physical weights or heavy ML libraries are not yet staged in `backend/models/`, logs a clear warning and activates deterministic simulation mode to ensure FastAPI server stability and uninterrupted frontend testing.
+  4. **Verification & Testing:**
+     - Created `backend/tests/test_access_engine.py` covering cosine similarity calculations, multi-person tailgating escalation, and single-person credential matching. All tests verified passing (100%).
+- **Technical Justification:** Provides the computer vision and biometric intelligence layer required to correlate RFID credential events with physical occupancy and facial biometrics while guaranteeing CUDA GPU acceleration and zero-crash fallback safety.
+
+---
+
+#### 2026-10-22 11:35:00
+- **File Path:** `backend/requirements.txt`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `UPDATE`
+- **Summary:** Installed GPU-accelerated PyTorch stack and core computer vision libraries into the backend environment:
+  1. **CUDA 12.1 PyTorch Stack:**
+     - Installed `torch==2.5.1+cu121`, `torchvision==0.20.1+cu121`, and `torchaudio==2.5.1+cu121` via dedicated index (`https://download.pytorch.org/whl/cu121`).
+     - Verified CUDA device binding: `torch.cuda.is_available() == True`, successfully identifying host GPU (`NVIDIA GeForce RTX 4050 Laptop GPU`).
+  2. **Core Vision Models & ONNX GPU Runtime:**
+     - Installed `ultralytics==8.4.183` (YOLOv8/11 person detection).
+     - Installed `insightface==2.1` (ArcFace 512-d biometric embedding extraction).
+     - Installed `onnxruntime-gpu==1.31.0` (GPU-accelerated ONNX graph inference).
+  3. **Reproducible Environment Lockfile (`backend/requirements.txt`):**
+     - Froze exact dependencies with CUDA wheel index configuration (`--extra-index-url https://download.pytorch.org/whl/cu121`), ensuring seamless, reproducible deployments.
+  4. **Test Suite Verification:**
+     - Executed full test suite with active PostgreSQL database; all 10 tests passed (100%).
+- **Technical Justification:** Arms the backend virtual environment with native NVIDIA CUDA 12.1 acceleration for real-time person detection, tailgating enforcement, and ArcFace facial biometric verification on the local RTX 4050 GPU.
+
+---
+
+#### 2026-10-22 12:05:00
+- **File Path:** `backend/scripts/enroll_face.py`, `backend/tests/test_enroll_face.py`, `.gitignore`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `CREATE`
+- **Summary:** Implemented interactive multi-user biometric enrollment script with dynamic camera selection and pickle database persistence:
+  1. **Dynamic Camera Indexing & Terminal Prompts:**
+     - Prompted user for camera index (e.g. `0` for Iriun Mobile, `1` for physical Laptop webcam) with DirectShow backend support on Windows.
+     - Captured rich teammate metadata: `Employee ID`, `Full Name`, and `Roll Number`.
+  2. **Viewfinder HUD & Biometric Capture:**
+     - Renders an interactive OpenCV viewfinder with facial centering reticles, status overlays, and key bindings (`SPACE` to capture and analyze, `ESC`/`Q` to cancel).
+     - Extracts 512-dimensional normalized facial feature embeddings via InsightFace `buffalo_l` ArcFace model.
+  3. **Non-Destructive Database Persistence (`backend/mock_employee_db.pkl`):**
+     - Safely checks and loads existing enrollments before writing, appending new teammates under key `employee_id` with schema `{ "name": full_name, "roll": roll_number, "embedding": face_embedding }`.
+     - Added `*.pkl` to root `.gitignore` to prevent committing private biometric vectors to source control.
+  4. **Verification & Testing:**
+     - Created `backend/tests/test_enroll_face.py` verifying multi-user incremental database persistence, vector normalization, and schema integrity. Passed (100%).
+- **Technical Justification:** Provides an interactive operational tool for enrolling physical team members from mobile or laptop cameras while guaranteeing non-destructive profile persistence and data privacy.
+
+---
+
+#### 2026-10-22 12:25:00
+- **File Path:** `backend/app/main.py`, `frontend/src/App.tsx`, `backend/tests/test_enroll_api.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `UPDATE`
+- **Summary:** Implemented full-stack GUI-based Live Biometric Personnel Enrollment with InsightFace and real-time React viewfinder:
+  1. **FastAPI Enrollment Endpoint (`POST /api/enroll`):**
+     - Initialized InsightFace `FaceAnalysis(name='buffalo_l', root=..., providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])` with `.prepare(ctx_id=0, det_size=(640, 640))`.
+     - Accepts payload: `device_id` (int), `employee_id` (str), `name` (str), `roll` (str).
+     - Instantly acquires latest camera frame from `multi_webcam_manager.get_worker(device_id).get_latest_jpeg()`, decoding directly to OpenCV numpy array without hardware lock collisions.
+     - Analyzes facial features; returns `400 Bad Request` with `{"error": "No face detected in frame"}` if zero faces are present in the viewfinder.
+     - Extracts and unit-normalizes 512-d ArcFace biometric embedding vector from the largest detected face.
+     - Persists new personnel profile non-destructively to `backend/mock_employee_db.pkl` under `db[employee_id] = {"name": name, "roll": roll, "embedding": embedding}`.
+     - Created `GET /api/enrolled-users` to inspect registered personnel records without exposing raw embedding arrays.
+  2. **React Dashboard Live Enrollment Modal (`frontend/src/App.tsx`):**
+     - Added Settings gear icon (`Settings` from `lucide-react`) to top-right header adjacent to infrastructure diagnostic probe button.
+     - Designed frosted-glass overlay modal (`backdrop-blur-md`, `bg-black/80`) with industrial B2B aesthetic.
+     - Integrated camera source selector dropdown (`Device 0 - Mobile Webcam (Iriun)`, `Device 1 - Laptop Webcam`, etc.).
+     - Added real-time optical viewfinder embedding `http://127.0.0.1:8000/api/webcam-stream/{enrollDeviceId}` with visual dashed centering target reticle and active MJPEG status indicators.
+     - Form inputs for Full Name, Roll Number, and Employee ID with validation.
+     - "Capture & Enroll" submit action button with loading spinner, disabled state during inference, and real-time in-modal success/error banner feedback.
+     - Keyboard navigation: `ESC` key dismisses modal.
+  3. **Automated Testing & Build Verification:**
+     - Added `backend/tests/test_enroll_api.py` covering frame decode, face detection failure (HTTP 400), successful embedding capture, and database registration.
+     - Verified complete backend pytest suite: 13 passed (100%).
+     - Verified frontend production bundle with `tsc -b && vite build` (0 errors) and `oxlint` (0 warnings).
+- **Technical Justification:** Eliminates the need for manual command-line terminal enrollment scripts by placing camera selection, live facial centering, and single-click biometric registration directly inside the operational command center UI.
+
+---
+
+#### 2026-10-22 12:45:00
+- **File Path:** `backend/app/main.py`, `backend/main.py`, `frontend/src/App.tsx`, `backend/tests/test_verify_access_api.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `UPDATE`
+- **Summary:** Built the Live AI Verification loop combining YOLOv8 person detection and InsightFace ArcFace biometric matching, wired to the React Access Control panel:
+  1. **YOLOv8 Initialization & Verification Endpoint (`POST /api/verify-access`):**
+     - Initialized tiny YOLOv8 model (`yolov8n.pt`) with auto-download and CUDA detection.
+     - Accepts JSON payload: `device_id` (int) and `employee_id` (str).
+     - Checks `mock_employee_db.pkl` for enrolled credentials; returns `404 Not Found` if the badge ID is missing.
+     - Fetches live camera buffer from `multi_webcam_manager.get_worker(device_id).get_latest_jpeg()`.
+     - **AI Step 1 (YOLO):** Evaluates frame for multi-person occupancy where `class == 0` (person count).
+     - **AI Step 2 (InsightFace):** Extracts 512-d normalized face vector and calculates Cosine Similarity against enrolled profile.
+     - **Verdict Logic:**
+       - `person_count > 1` &rarr; `TAILGATING`.
+       - `similarity >= 0.50` &rarr; `AUTHORIZED`.
+       - `similarity < 0.50` &rarr; `MISMATCH`.
+     - Returns telemetry payload: `{"status": verdict, "match_score": percentage, "person_count": count, "employee_name": db_name, ...}`.
+  2. **Access Control Panel Refinement (`frontend/src/App.tsx`):**
+     - Removed hardcoded static mock buttons ("Test: Normal Entry", "Test: Face Mismatch", "Test: Tailgating").
+     - Added dynamic `[ Employee ID to Scan ]` input field (auto-populated from live enrollment).
+     - Added `[ Target Camera (Device 0/1) ]` selector dropdown.
+     - Added primary action button: `[ Trigger Live AI ]` with active spinner and disabled state during inference.
+     - Automatically updates `currentAccess` security verdict, 512-d ArcFace match score bar, occupancy count, and personnel profile.
+     - Automatically pushes critical incident alerts (`FACE MISMATCH DETECTED` or `TAILGATING VIOLATION`) to the real-time Incident Dispatch Queue when a violation is flagged.
+  3. **Verification & Quality Assurance:**
+     - Verified live end-to-end inference against active webcam on Device 1: Successfully authenticated enrolled personnel `HARI PRASATH` (`EMP-1234`) with `AUTHORIZED` verdict (83.6% ArcFace match, 1 person).
+     - Created `backend/tests/test_verify_access_api.py` covering 404 missing employee, Authorized match, Tailgating override, and Mismatch rejection.
+     - Full backend pytest suite passing: 17/17 tests (100%).
+     - Frontend production bundle build verified with `tsc -b && vite build` (0 errors) and `oxlint` (0 warnings).
+- **Technical Justification:** Bridges registered facial biometric profiles and live optical camera sensors into an automated, real-time access control decision engine with person-count tailgating deterrence.

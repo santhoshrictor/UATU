@@ -2,10 +2,11 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+import pickle
 import sys
 import threading
 import time
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator, Dict, List, Optional
 import uuid
 
 import cv2
@@ -14,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 import numpy as np
+from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.app.api.v1.api import api_router
@@ -23,8 +25,52 @@ from backend.app.core.logging import logger
 # Base directory for uploads and video assets
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent.parent
 BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+# -----------------------------------------------------------------------------
+# InsightFace Initialization for Biometric Live Enrollment
+# -----------------------------------------------------------------------------
+INSIGHTFACE_ROOT = BACKEND_DIR / "models" / "insightface"
+candidate_roots = [
+    INSIGHTFACE_ROOT,
+    BACKEND_DIR / "models",
+]
+target_face_root = next(
+    (p for p in candidate_roots if (p / "models" / "buffalo_l").exists() or (p / "buffalo_l").exists()),
+    INSIGHTFACE_ROOT,
+)
+
+face_analysis_app = None
+try:
+    from insightface.app import FaceAnalysis
+    import torch
+
+    has_cuda = torch.cuda.is_available()
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if has_cuda else ["CPUExecutionProvider"]
+    logger.info(f"Initializing FaceAnalysis (buffalo_l) from root: {target_face_root} with providers: {providers}...")
+    face_analysis_app = FaceAnalysis(
+        name="buffalo_l",
+        root=str(target_face_root),
+        providers=providers,
+    )
+    face_analysis_app.prepare(ctx_id=0 if has_cuda else -1, det_size=(640, 640))
+    logger.info("FaceAnalysis pipeline ready for live GUI enrollment.")
+except Exception as e:
+    logger.warning(f"Could not initialize live FaceAnalysis: {e}. Check models in {INSIGHTFACE_ROOT}.")
 UPLOADS_DIR = BACKEND_DIR / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+MOCK_DB_PATH = BACKEND_DIR / "mock_employee_db.pkl"
+
+# -----------------------------------------------------------------------------
+# YOLOv8 Person Detection Initialization
+# -----------------------------------------------------------------------------
+yolo_model = None
+try:
+    from ultralytics import YOLO
+
+    yolo_model = YOLO("yolov8n.pt")
+    logger.info("YOLOv8 person detector initialized successfully.")
+except Exception as e:
+    logger.warning(f"Could not initialize YOLOv8: {e}")
 
 # Locate test_video.mp4
 TEST_VIDEO_PATHS = [
@@ -567,3 +613,279 @@ def get_custom_stream(video_id: str):
         ),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
+
+
+class EnrollRequest(BaseModel):
+    device_id: int = Field(default=1, description="Camera device index (e.g. 0 for Iriun Mobile, 1 for Laptop Webcam)")
+    employee_id: str = Field(..., description="Unique employee badge identifier (e.g. EMP-1001)")
+    name: str = Field(..., description="Full personnel name")
+    roll: str = Field(..., description="Roll number or departmental ID")
+
+
+@app.post("/api/enroll")
+async def enroll_personnel(payload: EnrollRequest):
+    """
+    Captures the live camera frame, extracts the 512-d facial embedding via InsightFace buffalo_l,
+    and appends the new record non-destructively to backend/mock_employee_db.pkl.
+    """
+    employee_id = payload.employee_id.strip()
+    name = payload.name.strip()
+    roll = payload.roll.strip()
+
+    if not employee_id or not name or not roll:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Fields 'employee_id', 'name', and 'roll' are required.",
+        )
+
+    # 1. Grab current live frame from requested device worker
+    worker = multi_webcam_manager.get_worker(payload.device_id)
+    jpeg_bytes = worker.get_latest_jpeg()
+
+    if not jpeg_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Camera Device {payload.device_id} buffer unavailable.",
+        )
+
+    # 2. Decode JPEG to OpenCV image array
+    nparr = np.frombuffer(jpeg_bytes, np.uint8)
+    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+    if frame is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to decode live camera frame for biometric extraction.",
+        )
+
+    # 3. Process frame with InsightFace FaceAnalysis
+    if face_analysis_app is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="InsightFace biometric model is not initialized on the server.",
+        )
+
+    try:
+        faces = face_analysis_app.get(frame)
+    except Exception as e:
+        logger.error(f"Error executing face analysis on live frame: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Biometric extraction failed: {str(e)}",
+        )
+
+    if not faces:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "No face detected in frame"},
+        )
+
+    # 4. Extract normalized 512-d embedding from primary (largest) face
+    best_face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+    raw_embedding = best_face.embedding  # 512-dimensional float32 vector
+    norm = np.linalg.norm(raw_embedding)
+    normalized_embedding = (raw_embedding / norm) if norm > 0 else raw_embedding
+
+    # 5. Persist to backend/mock_employee_db.pkl (preserving previous enrollments)
+    db_path = MOCK_DB_PATH
+    db: Dict[str, Any] = {}
+    if db_path.exists():
+        try:
+            with open(db_path, "rb") as f:
+                loaded = pickle.load(f)
+                if isinstance(loaded, dict):
+                    db = loaded
+        except Exception as e:
+            logger.warning(f"Could not load existing employee db: {e}. Starting fresh.")
+
+    db[employee_id] = {
+        "name": name,
+        "roll": roll,
+        "embedding": normalized_embedding,
+    }
+
+    try:
+        with open(db_path, "wb") as f:
+            pickle.dump(db, f)
+    except Exception as e:
+        logger.error(f"Failed to persist employee database: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to write to employee database: {str(e)}",
+        )
+
+    face_confidence = float(getattr(best_face, "det_score", 0.95))
+    logger.info(f"Enrolled {name} ({roll}) under {employee_id} via Device {payload.device_id}")
+
+    return {
+        "status": "success",
+        "message": f"Successfully enrolled {name} ({roll}) under {employee_id}.",
+        "employee_id": employee_id,
+        "name": name,
+        "roll": roll,
+        "confidence": round(face_confidence * 100, 1),
+        "total_enrolled": len(db),
+    }
+
+
+@app.get("/api/enrolled-users")
+def get_enrolled_users():
+    """Lists all enrolled personnel in mock_employee_db.pkl (omits raw vectors)."""
+    db_path = MOCK_DB_PATH
+    if not db_path.exists():
+        return {"users": [], "count": 0}
+
+    try:
+        with open(db_path, "rb") as f:
+            db = pickle.load(f)
+            users = [
+                {"employee_id": k, "name": v.get("name"), "roll": v.get("roll")}
+                for k, v in db.items()
+            ]
+            return {"users": users, "count": len(users)}
+    except Exception as e:
+        return {"users": [], "count": 0, "error": str(e)}
+
+
+class VerifyAccessRequest(BaseModel):
+    device_id: int = Field(default=1, description="Camera device index to look through (e.g. 0 for Iriun, 1 for Laptop)")
+    employee_id: str = Field(..., description="Scanned badge employee ID (e.g. EMP-1001)")
+
+
+@app.post("/api/verify-access")
+async def verify_access(payload: VerifyAccessRequest):
+    """
+    Live AI Verification loop:
+    1. Loads mock_employee_db.pkl. If employee_id is missing, returns 404 Not Found.
+    2. Grabs the live camera frame from multi_webcam_manager.get_worker(device_id).get_latest_jpeg().
+    3. AI Step 1 (YOLO): Runs yolo_model(frame) to count detections with class == 0 (person).
+    4. AI Step 2 (InsightFace): Runs face_analysis_app.get(frame). Computes Cosine Similarity against enrolled embedding.
+    5. Verdict Logic:
+       - If person count > 1: status = 'TAILGATING'
+       - Else if face similarity >= 0.50: status = 'AUTHORIZED'
+       - Else: status = 'MISMATCH'
+    6. Returns {"status": status, "match_score": match_score_pct, "person_count": person_count, "employee_name": db_name, ...}
+    """
+    employee_id = payload.employee_id.strip()
+    if not employee_id:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "Employee ID is required"},
+        )
+
+    # 1. Load mock_employee_db.pkl
+    db_path = MOCK_DB_PATH
+    if not db_path.exists():
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"error": "Employee database not found. Please enroll personnel first."},
+        )
+
+    try:
+        with open(db_path, "rb") as f:
+            db = pickle.load(f)
+    except Exception as e:
+        logger.error(f"Failed to read employee db: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": f"Failed to read employee database: {str(e)}"},
+        )
+
+    if employee_id not in db:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"error": f"Employee ID '{employee_id}' not found in database"},
+        )
+
+    employee_record = db[employee_id]
+    db_name = employee_record.get("name", "Unknown")
+    db_roll = employee_record.get("roll", "")
+    enrolled_emb = employee_record.get("embedding")
+
+    # 2. Grab live frame from camera worker
+    worker = multi_webcam_manager.get_worker(payload.device_id)
+    jpeg_bytes = worker.get_latest_jpeg()
+    if not jpeg_bytes:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"error": f"Camera Device {payload.device_id} buffer unavailable."},
+        )
+
+    nparr = np.frombuffer(jpeg_bytes, np.uint8)
+    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if frame is None:
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Failed to decode live camera frame"},
+        )
+
+    # 3. AI Step 1 (YOLOv8): Person detection / occupancy
+    person_count = 0
+    if yolo_model is not None:
+        try:
+            results = yolo_model(frame, verbose=False)
+            for r in results:
+                if r.boxes is not None:
+                    for box in r.boxes:
+                        cls_id = int(box.cls[0].item())
+                        if cls_id == 0:  # COCO class 0: person
+                            person_count += 1
+        except Exception as e:
+            logger.warning(f"YOLO inference error: {e}")
+            person_count = 1
+    else:
+        person_count = 1
+
+    # 4. AI Step 2 (InsightFace): Face embedding extraction & Cosine Similarity
+    similarity = 0.0
+    faces_detected = 0
+    if face_analysis_app is not None:
+        try:
+            faces = face_analysis_app.get(frame)
+            faces_detected = len(faces)
+            if faces and enrolled_emb is not None:
+                # Find largest face
+                best_face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+                live_emb = best_face.embedding
+                live_norm = np.linalg.norm(live_emb)
+                live_normed = (live_emb / live_norm) if live_norm > 0 else live_emb
+
+                enrolled_norm = np.linalg.norm(enrolled_emb)
+                enrolled_normed = (enrolled_emb / enrolled_norm) if enrolled_norm > 0 else enrolled_emb
+
+                cos_sim = float(np.dot(live_normed, enrolled_normed))
+                similarity = max(0.0, min(1.0, cos_sim))
+        except Exception as e:
+            logger.warning(f"InsightFace verification inference error: {e}")
+
+    # 5. Verdict Logic:
+    # - If person count > 1: status = 'TAILGATING'
+    # - Else if face similarity >= 0.50: status = 'AUTHORIZED'
+    # - Else: status = 'MISMATCH'
+    if person_count > 1:
+        verdict_status = "TAILGATING"
+    elif similarity >= 0.50:
+        verdict_status = "AUTHORIZED"
+    else:
+        verdict_status = "MISMATCH"
+
+    match_score_pct = round(similarity * 100, 1)
+
+    logger.info(
+        f"Verified {employee_id} ({db_name}): status={verdict_status}, match_score={match_score_pct}%, person_count={person_count}"
+    )
+
+    return {
+        "status": verdict_status,
+        "match_score": match_score_pct,
+        "raw_score": round(similarity, 4),
+        "person_count": person_count,
+        "faces_detected": faces_detected,
+        "employee_name": db_name,
+        "employee_id": employee_id,
+        "roll": db_roll,
+        "zone": f"Zone 01 // Device {payload.device_id}",
+        "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+    }
+
+

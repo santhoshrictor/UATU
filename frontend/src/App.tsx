@@ -11,9 +11,6 @@ import {
   XCircle,
   Clock,
   UserCheck,
-  UserX,
-  Users,
-  Sliders,
   Check,
   Settings,
   Maximize2,
@@ -284,6 +281,27 @@ export const App: React.FC = () => {
   const [alerts, setAlerts] = useState<IncidentAlert[]>(INITIAL_ALERTS);
   const [alertFilter, setAlertFilter] = useState<'ALL' | 'UNACKNOWLEDGED'>('ALL');
 
+  // Live Biometric Personnel Enrollment Modal State
+  const [showEnrollModal, setShowEnrollModal] = useState<boolean>(false);
+  const [enrollDeviceId, setEnrollDeviceId] = useState<number>(1);
+  const [enrollName, setEnrollName] = useState<string>('');
+  const [enrollRoll, setEnrollRoll] = useState<string>('');
+  const [enrollId, setEnrollId] = useState<string>('');
+  const [enrollLoading, setEnrollLoading] = useState<boolean>(false);
+  const [enrollFeedback, setEnrollFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+
+  // Live Biometric Verification State
+  const [verifyEmployeeId, setVerifyEmployeeId] = useState<string>('EMP-1001');
+  const [verifyDeviceId, setVerifyDeviceId] = useState<number>(1);
+  const [isVerifying, setIsVerifying] = useState<boolean>(false);
+  const [verifyFeedback, setVerifyFeedback] = useState<{
+    type: 'success' | 'warning' | 'error';
+    message: string;
+  } | null>(null);
+
   /* -----------------------------------------------------------------------
      1. Live System UTC Clock
      ----------------------------------------------------------------------- */
@@ -307,11 +325,14 @@ export const App: React.FC = () => {
         if (selectedCamForConfig) {
           setSelectedCamForConfig(null);
         }
+        if (showEnrollModal) {
+          setShowEnrollModal(false);
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [focusedCameraId, selectedCamForConfig]);
+  }, [focusedCameraId, selectedCamForConfig, showEnrollModal]);
 
   /* -----------------------------------------------------------------------
      3. Stream Reconnect / Recovery Timer (Ticks every 3s on error)
@@ -494,87 +515,158 @@ export const App: React.FC = () => {
   };
 
   /* -----------------------------------------------------------------------
-     6. Simulation Triggers (ArcFace Biometrics & RFID)
+     5b. Live Biometric Personnel Enrollment Submission (POST /api/enroll)
      ----------------------------------------------------------------------- */
-  const handleSimulateNormalEntry = () => {
-    const timeStr = formatUtcTime();
-    setCurrentAccess({
-      id: `ACC-${Math.floor(10000 + Math.random() * 90000)}`,
-      badgeId: 'EMP-4092',
-      employeeName: 'Sandy (Lead Admin)',
-      department: 'Infrastructure & Site Operations',
-      faceMatchScore: 0.964,
-      verdict: 'AUTHORIZED',
-      zone: 'Zone 01 // Main Turnstile North',
-      readerId: 'HID-SIGNO-40-A1',
-      timestamp: timeStr,
-      occupancyDetected: 1,
-    });
+  const handleEnrollSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!enrollName.trim() || !enrollRoll.trim() || !enrollId.trim()) {
+      setEnrollFeedback({
+        type: 'error',
+        message: 'Please complete all required fields (Full Name, Roll Number, Employee ID).',
+      });
+      return;
+    }
+
+    setEnrollLoading(true);
+    setEnrollFeedback(null);
+
+    try {
+      const response = await fetch('http://127.0.0.1:8000/api/enroll', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          device_id: Number(enrollDeviceId),
+          employee_id: enrollId.trim(),
+          name: enrollName.trim(),
+          roll: enrollRoll.trim(),
+        }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(data.error || data.detail || `Enrollment failed with HTTP ${response.status}`);
+      }
+
+      setEnrollFeedback({
+        type: 'success',
+        message: data.message || `Personnel ${enrollName.trim()} (${enrollId.trim()}) enrolled successfully!`,
+      });
+      setVerifyEmployeeId(enrollId.trim());
+      setEnrollName('');
+      setEnrollRoll('');
+      setEnrollId('');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Biometric capture failed';
+      setEnrollFeedback({
+        type: 'error',
+        message: msg,
+      });
+    } finally {
+      setEnrollLoading(false);
+    }
   };
 
-  const handleSimulateFaceMismatch = () => {
-    const timeStr = formatUtcTime();
-    const eventId = `EVT-${Math.floor(8000 + Math.random() * 2000)}`;
-    const accessId = `ACC-${Math.floor(10000 + Math.random() * 90000)}`;
-    const score = 0.428;
+  /* -----------------------------------------------------------------------
+     6. Live AI Verification Trigger (YOLOv8 + InsightFace ArcFace)
+     ----------------------------------------------------------------------- */
+  const handleLiveVerification = async () => {
+    const targetId = verifyEmployeeId.trim();
+    if (!targetId) {
+      setVerifyFeedback({
+        type: 'error',
+        message: 'Please enter a valid Employee ID to scan.',
+      });
+      return;
+    }
 
-    setCurrentAccess({
-      id: accessId,
-      badgeId: 'EMP-4092',
-      employeeName: 'Sandy (Lead Admin)',
-      department: 'Infrastructure & Site Operations',
-      faceMatchScore: score,
-      verdict: 'MISMATCH',
-      zone: 'Zone 01 // Main Turnstile North',
-      readerId: 'HID-SIGNO-40-A1',
-      timestamp: timeStr,
-      occupancyDetected: 1,
-    });
+    setIsVerifying(true);
+    setVerifyFeedback(null);
 
-    const newAlert: IncidentAlert = {
-      id: eventId,
-      timestamp: timeStr,
-      zone: 'Zone 01 // Main Turnstile North',
-      type: 'FACE MISMATCH DETECTED',
-      severity: 'WARNING',
-      detail: `Credential swipe EMP-4092 authenticated RFID token, but optical ArcFace match scored ${(score * 100).toFixed(1)}% (Threshold: 85.0%).`,
-      acknowledged: false,
-      eventRef: accessId,
-    };
+    try {
+      const response = await fetch('http://127.0.0.1:8000/api/verify-access', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          device_id: Number(verifyDeviceId),
+          employee_id: targetId,
+        }),
+      });
 
-    setAlerts((prev) => [newAlert, ...prev]);
-  };
+      const data = await response.json().catch(() => ({}));
 
-  const handleSimulateTailgating = () => {
-    const timeStr = formatUtcTime();
-    const eventId = `EVT-${Math.floor(8000 + Math.random() * 2000)}`;
-    const accessId = `ACC-${Math.floor(10000 + Math.random() * 90000)}`;
+      if (!response.ok) {
+        throw new Error(data.error || data.detail || `Verification failed with HTTP ${response.status}`);
+      }
 
-    setCurrentAccess({
-      id: accessId,
-      badgeId: 'EMP-4092',
-      employeeName: 'Sandy (Lead Admin)',
-      department: 'Infrastructure & Site Operations',
-      faceMatchScore: 0.958,
-      verdict: 'TAILGATING',
-      zone: 'Zone 01 // Main Turnstile North',
-      readerId: 'HID-SIGNO-40-A1',
-      timestamp: timeStr,
-      occupancyDetected: 2,
-    });
+      const accessId = `ACC-${Math.floor(10000 + Math.random() * 90000)}`;
+      const timeStr = data.timestamp || formatUtcTime();
+      const scoreFraction = typeof data.raw_score === 'number' ? data.raw_score : (Number(data.match_score || 0) / 100);
 
-    const newAlert: IncidentAlert = {
-      id: eventId,
-      timestamp: timeStr,
-      zone: 'Zone 01 // Main Turnstile North',
-      type: 'TAILGATING VIOLATION',
-      severity: 'CRITICAL',
-      detail: 'Tailgating event detected: 2 physical bodies crossed turnstile portal during single authorized credential scan (EMP-4092).',
-      acknowledged: false,
-      eventRef: accessId,
-    };
+      setCurrentAccess({
+        id: accessId,
+        badgeId: data.employee_id || targetId,
+        employeeName: data.employee_name || 'Unknown',
+        department: data.roll ? `Roll: ${data.roll}` : 'Verified Personnel',
+        faceMatchScore: scoreFraction,
+        verdict: data.status,
+        zone: data.zone || `Zone 01 // Device ${verifyDeviceId}`,
+        readerId: `CAM-DEV-${verifyDeviceId}`,
+        timestamp: timeStr,
+        occupancyDetected: data.person_count ?? 1,
+      });
 
-    setAlerts((prev) => [newAlert, ...prev]);
+      if (data.status === 'MISMATCH') {
+        const newAlert: IncidentAlert = {
+          id: `EVT-${Math.floor(8000 + Math.random() * 2000)}`,
+          timestamp: timeStr,
+          zone: data.zone || `Zone 01 // Device ${verifyDeviceId}`,
+          type: 'FACE MISMATCH DETECTED',
+          severity: 'WARNING',
+          detail: `Optical ArcFace match scored ${data.match_score}% for scanned badge ${data.employee_id} (${data.employee_name}) (Threshold: 50.0%).`,
+          acknowledged: false,
+          eventRef: accessId,
+        };
+        setAlerts((prev) => [newAlert, ...prev]);
+        setVerifyFeedback({
+          type: 'warning',
+          message: `MISMATCH: ArcFace match is ${data.match_score}% (under 50.0% threshold).`,
+        });
+      } else if (data.status === 'TAILGATING') {
+        const newAlert: IncidentAlert = {
+          id: `EVT-${Math.floor(8000 + Math.random() * 2000)}`,
+          timestamp: timeStr,
+          zone: data.zone || `Zone 01 // Device ${verifyDeviceId}`,
+          type: 'TAILGATING VIOLATION',
+          severity: 'CRITICAL',
+          detail: `Tailgating breach detected: ${data.person_count} physical persons detected in frame during credential scan for ${data.employee_id} (${data.employee_name}).`,
+          acknowledged: false,
+          eventRef: accessId,
+        };
+        setAlerts((prev) => [newAlert, ...prev]);
+        setVerifyFeedback({
+          type: 'error',
+          message: `TAILGATING DETECTED: ${data.person_count} persons in camera frame!`,
+        });
+      } else {
+        setVerifyFeedback({
+          type: 'success',
+          message: `AUTHORIZED: ${data.employee_name} verified (${data.match_score}% ArcFace match).`,
+        });
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Verification request failed';
+      setVerifyFeedback({
+        type: 'error',
+        message: msg,
+      });
+    } finally {
+      setIsVerifying(false);
+    }
   };
 
   /* -----------------------------------------------------------------------
@@ -704,6 +796,20 @@ export const App: React.FC = () => {
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isProbing ? 'animate-spin text-emerald-400' : ''}`} />
               <span className="hidden md:inline">Probe</span>
+            </button>
+
+            {/* Personnel Live Biometric Enrollment Gear Button */}
+            <button
+              onClick={() => {
+                setShowEnrollModal(true);
+                setEnrollFeedback(null);
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white transition-all group"
+              title="Register New Personnel (Live ArcFace Biometrics)"
+              aria-label="Settings and Live Enrollment"
+            >
+              <Settings className="w-3.5 h-3.5 text-emerald-400 group-hover:rotate-45 transition-transform duration-200" />
+              <span className="hidden md:inline font-mono text-xs">Enroll</span>
             </button>
 
             {/* Live UTC Telemetry Clock */}
@@ -1081,7 +1187,7 @@ export const App: React.FC = () => {
                 </div>
                 <div className="mt-4 pt-2 border-t border-slate-900 text-[11px] font-mono text-slate-500 flex items-center justify-between">
                   <span>THRESHOLD:</span>
-                  <span className="text-slate-300">&ge; 85.0% Required</span>
+                  <span className="text-slate-300">&ge; 50.0% Required</span>
                 </div>
               </div>
 
@@ -1129,44 +1235,90 @@ export const App: React.FC = () => {
               </div>
             </div>
 
-            {/* Physical Event Simulation Bar */}
+            {/* Live AI Biometric & Tailgating Verification Control */}
             <div className="mt-1 bg-slate-950/80 rounded-lg border border-slate-800 p-3.5">
               <div className="flex flex-wrap items-center justify-between gap-3 mb-2.5">
                 <div className="flex items-center gap-2">
-                  <Sliders className="w-3.5 h-3.5 text-slate-400" />
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
                   <span className="text-xs font-mono font-semibold tracking-wider text-slate-300 uppercase">
-                    Physical Event Simulation Engine (Interactive Verification)
+                    Live AI Verification Engine (YOLOv8 + ArcFace)
                   </span>
                 </div>
                 <span className="text-[11px] font-mono text-slate-500">
-                  Direct state modification &amp; alert triggering
+                  Real-time optical frame evaluation &amp; tailgating check
                 </span>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <button
-                  onClick={handleSimulateNormalEntry}
-                  className="flex items-center justify-center gap-2 px-3 py-2 rounded bg-slate-900 hover:bg-slate-800 border border-emerald-500/30 hover:border-emerald-500/60 text-emerald-400 font-mono text-xs font-medium transition-all shadow-sm group"
+              {/* Feedback Banner */}
+              {verifyFeedback && (
+                <div
+                  className={`mb-3 p-2.5 rounded-lg border text-xs font-mono flex items-center gap-2 ${
+                    verifyFeedback.type === 'success'
+                      ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
+                      : verifyFeedback.type === 'warning'
+                      ? 'bg-amber-950/40 border-amber-500/40 text-amber-300'
+                      : 'bg-red-950/40 border-red-500/40 text-red-300'
+                  }`}
                 >
-                  <UserCheck className="w-4 h-4 text-emerald-400 group-hover:scale-110 transition-transform" />
-                  <span>Test: Normal Entry</span>
-                </button>
+                  {verifyFeedback.type === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />}
+                  {verifyFeedback.type === 'warning' && <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />}
+                  {verifyFeedback.type === 'error' && <XCircle className="w-4 h-4 text-red-400 shrink-0" />}
+                  <span className="flex-1">{verifyFeedback.message}</span>
+                </div>
+              )}
 
-                <button
-                  onClick={handleSimulateFaceMismatch}
-                  className="flex items-center justify-center gap-2 px-3 py-2 rounded bg-slate-900 hover:bg-slate-800 border border-amber-500/30 hover:border-amber-500/60 text-amber-400 font-mono text-xs font-medium transition-all shadow-sm group"
-                >
-                  <UserX className="w-4 h-4 text-amber-400 group-hover:scale-110 transition-transform" />
-                  <span>Test: Face Mismatch</span>
-                </button>
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+                {/* Employee ID to Scan Input */}
+                <div className="sm:col-span-5">
+                  <label className="block text-[11px] font-mono text-slate-400 mb-1">
+                    Employee ID to Scan
+                  </label>
+                  <input
+                    type="text"
+                    value={verifyEmployeeId}
+                    onChange={(e) => setVerifyEmployeeId(e.target.value)}
+                    placeholder="e.g. EMP-1001"
+                    disabled={isVerifying}
+                    className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-xs font-mono text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-emerald-500 transition-colors"
+                  />
+                </div>
 
-                <button
-                  onClick={handleSimulateTailgating}
-                  className="flex items-center justify-center gap-2 px-3 py-2 rounded bg-slate-900 hover:bg-slate-800 border border-red-500/30 hover:border-red-500/60 text-red-400 font-mono text-xs font-medium transition-all shadow-sm group"
-                >
-                  <Users className="w-4 h-4 text-red-400 group-hover:scale-110 transition-transform" />
-                  <span>Test: Tailgating</span>
-                </button>
+                {/* Target Camera Selector Dropdown */}
+                <div className="sm:col-span-4">
+                  <label className="block text-[11px] font-mono text-slate-400 mb-1">
+                    Target Camera
+                  </label>
+                  <select
+                    value={verifyDeviceId}
+                    onChange={(e) => setVerifyDeviceId(Number(e.target.value))}
+                    disabled={isVerifying}
+                    className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-xs font-mono text-slate-200 focus:outline-none focus:border-emerald-500 transition-colors"
+                  >
+                    <option value={0}>Device 0 &mdash; Mobile (Iriun)</option>
+                    <option value={1}>Device 1 &mdash; Laptop Webcam</option>
+                  </select>
+                </div>
+
+                {/* Trigger Live AI Verification Button */}
+                <div className="sm:col-span-3">
+                  <button
+                    onClick={handleLiveVerification}
+                    disabled={isVerifying}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-xs font-semibold transition-all shadow-md shadow-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isVerifying ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Verifying...</span>
+                      </>
+                    ) : (
+                      <>
+                        <ShieldCheck className="w-3.5 h-3.5" />
+                        <span>Trigger Live AI</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -1570,6 +1722,211 @@ export const App: React.FC = () => {
               >
                 Close
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          LIVE BIOMETRIC PERSONNEL ENROLLMENT MODAL
+          ===================================================================== */}
+      {showEnrollModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <div className="bg-[#0f172a] border border-[#1e293b] rounded-xl shadow-2xl max-w-2xl w-full p-6 text-slate-200 relative overflow-hidden flex flex-col max-h-[90vh]">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-4 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
+                  <UserCheck className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-base text-slate-100 flex items-center gap-2">
+                    Register New Personnel
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-400 border border-emerald-800/50">
+                      LIVE ARCFACE
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Capture face embedding directly from live optical feed into biometric database
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setShowEnrollModal(false);
+                  setEnrollFeedback(null);
+                }}
+                className="text-slate-400 hover:text-slate-200 p-1.5 rounded hover:bg-slate-800 transition-colors"
+                title="Close Modal"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body: Viewfinder + Form Inputs */}
+            <div className="py-4 space-y-4 overflow-y-auto flex-1 pr-1">
+              {/* Feedback Alert Banner */}
+              {enrollFeedback && (
+                <div
+                  className={`p-3 rounded-lg border flex items-start gap-2.5 text-xs font-mono transition-all ${
+                    enrollFeedback.type === 'success'
+                      ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-300'
+                      : 'bg-red-950/40 border-red-500/50 text-red-300'
+                  }`}
+                >
+                  {enrollFeedback.type === 'success' ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                  ) : (
+                    <XCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                  )}
+                  <div className="flex-1 leading-relaxed">
+                    {enrollFeedback.message}
+                  </div>
+                </div>
+              )}
+
+              {/* Camera Source Selector */}
+              <div>
+                <label className="block text-xs font-mono text-slate-400 mb-1.5 uppercase tracking-wider">
+                  Optical Source Selector
+                </label>
+                <select
+                  value={enrollDeviceId}
+                  onChange={(e) => setEnrollDeviceId(Number(e.target.value))}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-200 focus:outline-none focus:border-emerald-500 transition-colors"
+                >
+                  <option value={0}>Device 0 &mdash; Mobile Webcam (Iriun / Device 0)</option>
+                  <option value={1}>Device 1 &mdash; Laptop Webcam (Physical / Device 1)</option>
+                  <option value={2}>Device 2 &mdash; External USB / Secondary Sensor</option>
+                </select>
+              </div>
+
+              {/* Live Viewfinder Feed */}
+              <div>
+                <div className="flex items-center justify-between text-xs font-mono text-slate-400 mb-1.5">
+                  <span className="flex items-center gap-1.5">
+                    <Camera className="w-3.5 h-3.5 text-emerald-400" />
+                    LIVE ALIGNMENT VIEWFINDER (DEVICE {enrollDeviceId})
+                  </span>
+                  <span className="text-[10px] text-emerald-400/80 flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    REAL-TIME MJPEG
+                  </span>
+                </div>
+                <div className="relative aspect-video bg-black rounded-lg border border-slate-800 overflow-hidden flex items-center justify-center group shadow-inner">
+                  <img
+                    key={`viewfinder-stream-${enrollDeviceId}`}
+                    src={`http://127.0.0.1:8000/api/webcam-stream/${enrollDeviceId}`}
+                    alt={`Enrollment Viewfinder Cam ${enrollDeviceId}`}
+                    className="w-full h-full object-cover"
+                    onError={(e) => {
+                      (e.currentTarget as HTMLElement).style.display = 'none';
+                      const fallback = e.currentTarget.parentElement?.querySelector('.stream-fallback');
+                      if (fallback) fallback.classList.remove('hidden');
+                    }}
+                  />
+                  {/* Fallback placeholder if stream disconnected */}
+                  <div className="stream-fallback hidden absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-slate-950/90 text-slate-500 font-mono text-xs">
+                    <Camera className="w-8 h-8 mb-2 text-slate-600" />
+                    <span>Camera stream offline or unavailable</span>
+                    <span className="text-[10px] text-slate-600 mt-1">Check that Device {enrollDeviceId} is connected</span>
+                  </div>
+
+                  {/* Facial Alignment Target Reticle Overlay */}
+                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                    <div className="w-36 h-48 sm:w-44 sm:h-56 border-2 border-dashed border-emerald-400/40 rounded-full flex items-center justify-center">
+                      <div className="w-2 h-2 rounded-full bg-emerald-400/30" />
+                    </div>
+                  </div>
+                  <div className="pointer-events-none absolute bottom-2 left-2 right-2 text-center text-[10px] font-mono text-slate-400 bg-slate-950/70 py-0.5 px-2 rounded">
+                    Position personnel face inside the target frame before capturing
+                  </div>
+                </div>
+              </div>
+
+              {/* Form Inputs (Full Name, Roll Number, Employee ID) */}
+              <form onSubmit={handleEnrollSubmit} className="space-y-3 pt-1">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-mono text-slate-400 mb-1">
+                      Full Name *
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. John Doe"
+                      value={enrollName}
+                      onChange={(e) => setEnrollName(e.target.value)}
+                      disabled={enrollLoading}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-emerald-500 transition-colors"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-mono text-slate-400 mb-1">
+                      Roll Number *
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. 21CS042"
+                      value={enrollRoll}
+                      onChange={(e) => setEnrollRoll(e.target.value)}
+                      disabled={enrollLoading}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-emerald-500 transition-colors"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-mono text-slate-400 mb-1">
+                    Employee ID *
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. EMP-1001"
+                    value={enrollId}
+                    onChange={(e) => setEnrollId(e.target.value)}
+                    disabled={enrollLoading}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-emerald-500 transition-colors"
+                  />
+                </div>
+              </form>
+            </div>
+
+            {/* Modal Footer Actions */}
+            <div className="pt-4 border-t border-slate-800 flex items-center justify-between gap-3">
+              <span className="text-[11px] font-mono text-slate-500 hidden sm:inline">
+                Storage: <span className="text-slate-400">mock_employee_db.pkl</span> (512-d normalized)
+              </span>
+              <div className="flex items-center gap-2 ml-auto">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowEnrollModal(false);
+                    setEnrollFeedback(null);
+                  }}
+                  disabled={enrollLoading}
+                  className="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-xs font-mono transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleEnrollSubmit()}
+                  disabled={enrollLoading}
+                  className="flex items-center gap-2 px-5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-xs font-semibold shadow-lg shadow-emerald-950/50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {enrollLoading ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      Capturing &amp; Extracting...
+                    </>
+                  ) : (
+                    <>
+                      <Camera className="w-3.5 h-3.5" />
+                      Capture &amp; Enroll
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </div>
