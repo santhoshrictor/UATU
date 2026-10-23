@@ -2,6 +2,16 @@
 Root backend entry point delegating to backend.app.main.
 Ensures compatibility with both `uvicorn backend.main:app` and `uvicorn backend.app.main:app`.
 """
+from datetime import datetime, timezone, timedelta
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def get_current_ist_timestamp() -> str:
+    """Format the alert time using Indian Standard Time (IST / UTC+5:30)."""
+    return datetime.now(IST).strftime("%H:%M:%S IST")
+
+
 from backend.app.main import (
     app,
     CameraDeviceWorker,
@@ -40,5 +50,7 @@ __all__ = [
     "evaluate_entry_event",
     "SpatialTracker",
     "alert_manager",
+    "IST",
+    "get_current_ist_timestamp",
 ]
 

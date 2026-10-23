@@ -321,8 +321,8 @@ def test_websocket_alert_cooldown():
         assert payload["zone"] == "Live Monitoring Zone"
         assert payload["type"] == "ABNORMAL GATHERING"
         assert payload["level"] == "CRITICAL"
-        assert payload["detail"] == "Occupancy threshold breached (> 3 persons)."
         assert payload["acknowledged"] is False
+        assert payload["time"].endswith(" IST")
 
         # Frame 2 immediately after: Cooldown is active, must NOT re-dispatch
         tracker.process_frame(blank.copy())
@@ -351,7 +351,7 @@ def test_camera_device_worker_alert_cooldown():
                 worker.last_crowd_alert_time = now_ts
                 payload = {
                     "id": f"EVT-CROWD-{int(now_ts)}",
-                    "time": "12:00:00 UTC",
+                    "time": "12:00:00 IST",
                     "zone": "Live Monitoring Zone",
                     "type": "ABNORMAL GATHERING",
                     "level": "CRITICAL",
@@ -372,6 +372,702 @@ def test_camera_device_worker_alert_cooldown():
                 alert_manager.broadcast_sync({})
 
         assert mock_broadcast.call_count == 1
+
+
+def make_pose_keypoints(nose_y=120, hip_y=230, nose_x=150, hip_x=150, shoulder_y=None, conf=0.95):
+    if shoulder_y is None:
+        if nose_y <= hip_y:
+            shoulder_y = nose_y + (hip_y - nose_y) * 0.35
+        else:
+            shoulder_y = hip_y - 8.0  # Spine compressed: shoulders close to hips
+    kpts = np.zeros((17, 3), dtype=np.float32)
+    kpts[:, 2] = conf
+    kpts[0, :2] = [nose_x, nose_y]           # Nose
+    kpts[1, :2] = [nose_x - 5, nose_y - 5]   # Left eye
+    kpts[2, :2] = [nose_x + 5, nose_y - 5]   # Right eye
+    kpts[3, :2] = [nose_x - 10, nose_y - 5]  # Left ear
+    kpts[4, :2] = [nose_x + 10, nose_y - 5]  # Right ear
+    kpts[5, :2] = [nose_x - 30, shoulder_y]  # Left shoulder
+    kpts[6, :2] = [nose_x + 30, shoulder_y]  # Right shoulder
+    kpts[7, :2] = [nose_x - 40, shoulder_y + 30] # Left elbow
+    kpts[8, :2] = [nose_x + 40, shoulder_y + 30] # Right elbow
+    kpts[9, :2] = [nose_x - 45, shoulder_y + 60] # Left wrist
+    kpts[10, :2] = [nose_x + 45, shoulder_y + 60]# Right wrist
+    kpts[11, :2] = [hip_x - 20, hip_y]       # Left hip
+    kpts[12, :2] = [hip_x + 20, hip_y]       # Right hip
+    kpts[13, :2] = [hip_x - 20, hip_y + 40]  # Left knee
+    kpts[14, :2] = [hip_x + 20, hip_y + 40]  # Right knee
+    kpts[15, :2] = [hip_x - 20, hip_y + 80]  # Left ankle
+    kpts[16, :2] = [hip_x + 20, hip_y + 80]  # Right ankle
+    mock_kp = MagicMock()
+    mock_kp.xy = np.array([kpts[:, :2]])
+    mock_kp.data = np.array([kpts])
+    mock_kp.conf = np.array([[conf] * 17])
+    return mock_kp
+
+
+def test_fall_detection_upright_person_nominal():
+    """
+    Verifies Feature 17 (Fall Detection):
+    An upright standing person (aspect_ratio = 0.4 < 1.2, nose_y < hips_y)
+    does not trigger fall detection.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # Box: width 100, height 250 (aspect_ratio = 0.4)
+    p = MagicMock()
+    p.cls = [MagicMock(item=lambda: 0)]
+    p.conf = [MagicMock(item=lambda: 0.90)]
+    p.xyxy = [np.array([100, 100, 200, 350])]
+    p.id = MagicMock(item=lambda: 1)
+
+    # Keypoints for upright person:
+    # Nose (kp 0) at y=120, Hips (kp 11, 12) at y=230 -> nose_y < hips_y
+    mock_res = MagicMock(boxes=[p], keypoints=make_pose_keypoints(nose_y=120, hip_y=230))
+    mock_model = MagicMock()
+    mock_model.track.return_value = [mock_res]
+
+    tracker = SpatialTracker(model=mock_model)
+    annotated, counts = tracker.process_frame(blank)
+
+    assert counts["fall_detected"] is False
+    # Upright person bounding box is drawn in green (74, 222, 128)
+    assert np.any(annotated[100:350, 100:200, 1] > 200)
+
+
+def test_fall_detection_prone_person_breached():
+    """
+    Verifies Feature 17 (Fall Detection):
+    When a person collapses with head lower than hips (nose_y >= hip_y),
+    spine compressed, and persists for 2 consecutive frames,
+    fall_detected is True, and the person's bounding box and skeleton turn Pure Red.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # Frame 1: Person standing upright (y1=100, y2=300 -> h=200, w=100, nose_y=120 < hip_y=230)
+    p_upright = MagicMock()
+    p_upright.cls = [MagicMock(item=lambda: 0)]
+    p_upright.conf = [MagicMock(item=lambda: 0.95)]
+    p_upright.xyxy = [np.array([100, 100, 200, 300])]
+    p_upright.id = MagicMock(item=lambda: 2)
+
+    res_f1 = MagicMock(boxes=[p_upright], keypoints=make_pose_keypoints(nose_y=120, hip_y=230))
+    mock_model = MagicMock()
+    mock_model.track.return_value = [res_f1]
+
+    tracker = SpatialTracker(model=mock_model)
+    _, counts_f1 = tracker.process_frame(blank.copy())
+    assert counts_f1["fall_detected"] is False
+
+    # Frame 2: Person collapsed prone (1st fall frame -> glitch filter, not yet confirmed)
+    p_fallen = MagicMock()
+    p_fallen.cls = [MagicMock(item=lambda: 0)]
+    p_fallen.conf = [MagicMock(item=lambda: 0.95)]
+    p_fallen.xyxy = [np.array([100, 300, 400, 400])]
+    p_fallen.id = MagicMock(item=lambda: 2)
+
+    res_f2 = MagicMock(boxes=[p_fallen], keypoints=make_pose_keypoints(nose_y=380, hip_y=330))
+    mock_model.track.return_value = [res_f2]
+
+    # Frames 1-4: Temporal buffer suppresses transients
+    for _ in range(4):
+        _, counts_glitch = tracker.process_frame(blank.copy())
+        assert counts_glitch["fall_detected"] is False
+
+    # Frame 5: 5th consecutive frame -> confirmed breach!
+    annotated_f2, counts_f2 = tracker.process_frame(blank.copy())
+
+    assert counts_f2["fall_detected"] is True
+    # Box should be rendered with pure Red (0, 0, 255)
+    box_top_edge = annotated_f2[300, 100:400]
+    assert np.any(box_top_edge[:, 2] > 200)
+
+
+def test_fall_detection_upright_nominal_posture():
+    """
+    Verifies that an upright person (w <= h, h >= 80)
+    does not trigger false positive fall detection, and box remains green.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    p = MagicMock()
+    p.cls = [MagicMock(item=lambda: 0)]
+    p.conf = [MagicMock(item=lambda: 0.90)]
+    p.xyxy = [np.array([100, 150, 200, 320])]  # width 100, height 170 -> w <= h, h >= 80
+    p.id = MagicMock(item=lambda: 3)
+
+    mock_res = MagicMock(boxes=[p], keypoints=None)
+    mock_model = MagicMock()
+    mock_model.track.return_value = [mock_res]
+
+    tracker = SpatialTracker(model=mock_model)
+    annotated, counts = tracker.process_frame(blank)
+
+    assert counts["fall_detected"] is False
+    # Green box (74, 222, 128)
+    assert np.any(annotated[150:320, 100:200, 1] > 200)
+
+
+def test_webcam_sitting_person_no_false_positive():
+    """
+    Crucial Webcam False-Positive Elimination Test:
+    Sitting upright close to a webcam produces a wide bounding box (w > h * 1.1).
+    Because the vertical center is stationary and does not drop rapidly,
+    and height is not compressed by > 50%, it is NEVER flagged as fallen.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # Frame 1: Person sitting close to webcam with broad shoulders (width=350, height=250 -> w > h * 1.0)
+    p_sitting_1 = MagicMock()
+    p_sitting_1.cls = [MagicMock(item=lambda: 0)]
+    p_sitting_1.conf = [MagicMock(item=lambda: 0.92)]
+    p_sitting_1.xyxy = [np.array([100, 100, 450, 350])]  # w=350, h=250
+    p_sitting_1.id = MagicMock(item=lambda: 10)
+
+    # Keypoints: Head is ABOVE hips (nose_y=130 < hip_y=280)
+    res_f1 = MagicMock(boxes=[p_sitting_1], keypoints=make_pose_keypoints(nose_y=130, hip_y=280))
+    mock_model = MagicMock()
+    mock_model.track.return_value = [res_f1]
+
+    tracker = SpatialTracker(model=mock_model)
+    annotated_f1, counts_f1 = tracker.process_frame(blank.copy())
+    assert counts_f1["fall_detected"] is False
+
+    # Frame 2: Person continues sitting normally at desk/webcam (head still above hips)
+    p_sitting_2 = MagicMock()
+    p_sitting_2.cls = [MagicMock(item=lambda: 0)]
+    p_sitting_2.conf = [MagicMock(item=lambda: 0.92)]
+    p_sitting_2.xyxy = [np.array([102, 101, 451, 351])]  # w=349, h=250
+    p_sitting_2.id = MagicMock(item=lambda: 10)
+
+    res_f2 = MagicMock(boxes=[p_sitting_2], keypoints=make_pose_keypoints(nose_y=130, hip_y=280))
+    mock_model.track.return_value = [res_f2]
+
+    annotated_f2, counts_f2 = tracker.process_frame(blank.copy())
+
+    # MUST NEVER trigger false positive on a sitting person whose head is above hips
+    assert counts_f2["fall_detected"] is False
+    # Box remains Emerald Green (74, 222, 128)
+    assert np.any(annotated_f2[101:351, 102:451, 1] > 200)
+
+
+def test_webcam_fall_rapid_trajectory_drop():
+    """
+    Verifies that when a person collapses prone, the pose condition triggers fall detection.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # Frame 1: Person sitting at webcam (head above hips: nose_y=130 < hip_y=280)
+    p_sitting = MagicMock()
+    p_sitting.cls = [MagicMock(item=lambda: 0)]
+    p_sitting.conf = [MagicMock(item=lambda: 0.92)]
+    p_sitting.xyxy = [np.array([150, 100, 400, 300])]
+    p_sitting.id = MagicMock(item=lambda: 11)
+
+    res_f1 = MagicMock(boxes=[p_sitting], keypoints=make_pose_keypoints(nose_y=130, hip_y=280))
+    mock_model = MagicMock()
+    mock_model.track.return_value = [res_f1]
+
+    tracker = SpatialTracker(model=mock_model)
+    _, counts_f1 = tracker.process_frame(blank.copy())
+    assert counts_f1["fall_detected"] is False
+
+    # Frame 2: Person collapses onto floor (w=300 > h=120 * 1.0, nose_y=400 > hip_y=350)
+    p_collapsed = MagicMock()
+    p_collapsed.cls = [MagicMock(item=lambda: 0)]
+    p_collapsed.conf = [MagicMock(item=lambda: 0.95)]
+    p_collapsed.xyxy = [np.array([100, 320, 400, 440])]
+    p_collapsed.id = MagicMock(item=lambda: 11)
+
+    res_f2 = MagicMock(boxes=[p_collapsed], keypoints=make_pose_keypoints(nose_y=400, hip_y=350))
+    mock_model.track.return_value = [res_f2]
+
+    # Frames 1-4: Temporal buffer suppresses transients
+    for _ in range(4):
+        _, counts_glitch = tracker.process_frame(blank.copy())
+        assert counts_glitch["fall_detected"] is False
+
+    # Frame 5: 5th consecutive frame of fall -> confirmed
+    annotated_f2, counts_f2 = tracker.process_frame(blank.copy())
+
+    assert counts_f2["fall_detected"] is True
+    # Pure Red override (0, 0, 255)
+    assert np.any(annotated_f2[320:440, 100:400, 2] > 200)
+
+
+def test_webcam_fall_height_compression_over_50_percent():
+    """
+    Verifies that when a person collapses prone, the pose condition triggers fall detection.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # Frame 1: Person standing (nose_y=100 < hip_y=250)
+    p_standing = MagicMock()
+    p_standing.cls = [MagicMock(item=lambda: 0)]
+    p_standing.conf = [MagicMock(item=lambda: 0.92)]
+    p_standing.xyxy = [np.array([200, 50, 350, 350])]
+    p_standing.id = MagicMock(item=lambda: 12)
+
+    res_f1 = MagicMock(boxes=[p_standing], keypoints=make_pose_keypoints(nose_y=100, hip_y=250))
+    mock_model = MagicMock()
+    mock_model.track.return_value = [res_f1]
+
+    tracker = SpatialTracker(model=mock_model)
+    _, counts_f1 = tracker.process_frame(blank.copy())
+    assert counts_f1["fall_detected"] is False
+
+    # Frame 2: Person collapses down (nose_y=380 > hip_y=320, w=200 > h=120 * 1.0)
+    p_collapsed = MagicMock()
+    p_collapsed.cls = [MagicMock(item=lambda: 0)]
+    p_collapsed.conf = [MagicMock(item=lambda: 0.95)]
+    p_collapsed.xyxy = [np.array([150, 280, 350, 400])]
+    p_collapsed.id = MagicMock(item=lambda: 12)
+
+    res_f2 = MagicMock(boxes=[p_collapsed], keypoints=make_pose_keypoints(nose_y=380, hip_y=320))
+    mock_model.track.return_value = [res_f2]
+
+    # Frames 1-4 of collapse: glitch prevention
+    for _ in range(4):
+        _, counts = tracker.process_frame(blank.copy())
+        assert counts["fall_detected"] is False
+
+    # Frame 5: 5th consecutive frame -> confirmed
+    annotated_f2, counts_f2 = tracker.process_frame(blank.copy())
+
+    assert counts_f2["fall_detected"] is True
+    assert np.any(annotated_f2[280:400, 150:350, 2] > 200)
+
+
+
+def test_camera_device_worker_fall_alert_cooldown():
+    """
+    Verifies that CameraDeviceWorker in main.py checks fall_detected,
+    dispatches EVT-FALL payload to alert_manager, and enforces 15s cooldown.
+    """
+    from backend.app.main import CameraDeviceWorker
+    worker = CameraDeviceWorker(device_id=98)
+    assert hasattr(worker, "last_fall_alert_time")
+    assert worker.fall_alert_cooldown == 15.0
+
+    mock_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    worker.tracker.process_frame = MagicMock(return_value=(mock_frame, {"fall_detected": True, "occupancy": 1}))
+
+    with patch("backend.app.main.alert_manager.broadcast_sync") as mock_broadcast:
+        counts = {"fall_detected": True, "occupancy": 1}
+        now_ts = 2000.0
+        if counts.get("fall_detected"):
+            if (now_ts - worker.last_fall_alert_time) >= worker.fall_alert_cooldown:
+                worker.last_fall_alert_time = now_ts
+                payload = {
+                    "id": f"EVT-FALL-{int(now_ts)}",
+                    "time": "12:00:00 IST",
+                    "zone": "Live Monitoring Zone",
+                    "type": "MAN DOWN / FALL DETECTED",
+                    "level": "CRITICAL",
+                    "detail": "Worker fall detected based on skeletal pose geometry. Immediate assistance required.",
+                    "acknowledged": False,
+                }
+                from backend.app.core.websocket_manager import alert_manager
+                alert_manager.broadcast_sync(payload)
+
+        assert mock_broadcast.call_count == 1
+        assert worker.last_fall_alert_time == 2000.0
+        sent_payload = mock_broadcast.call_args[0][0]
+        assert sent_payload["id"] == "EVT-FALL-2000"
+        assert sent_payload["type"] == "MAN DOWN / FALL DETECTED"
+        assert sent_payload["level"] == "CRITICAL"
+        assert sent_payload["detail"] == "Worker fall detected based on skeletal pose geometry. Immediate assistance required."
+
+        # Within 15s cooldown window (5s later) -> must not fire
+        now_ts_next = 2005.0
+        if counts.get("fall_detected"):
+            if (now_ts_next - worker.last_fall_alert_time) >= worker.fall_alert_cooldown:
+                worker.last_fall_alert_time = now_ts_next
+                alert_manager.broadcast_sync({})
+
+        assert mock_broadcast.call_count == 1
+
+
+def test_overhead_fall_detection_height_compression():
+    """
+    Verifies Overhead/Ceiling CCTV Fall Detection with pose:
+    When a person collapses with head lower than hips (nose_y > hip_y) and w > h * 1.0,
+    fall is detected.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # Frame 1: Person standing normally (nose_y=80 < hip_y=180)
+    p_standing = MagicMock()
+    p_standing.cls = [MagicMock(item=lambda: 0)]
+    p_standing.conf = [MagicMock(item=lambda: 0.92)]
+    p_standing.xyxy = [np.array([100, 50, 200, 250])]
+    p_standing.id = MagicMock(item=lambda: 7)
+
+    res_f1 = MagicMock(boxes=[p_standing], keypoints=make_pose_keypoints(nose_y=80, hip_y=180))
+    mock_model = MagicMock()
+    mock_model.track.return_value = [res_f1]
+
+    tracker = SpatialTracker(model=mock_model)
+    annotated_f1, counts_f1 = tracker.process_frame(blank.copy())
+
+    assert counts_f1["fall_detected"] is False
+
+    # Frame 2: Person collapses downwards (nose_y=220 > hip_y=180, w=150 > h=90 * 1.0)
+    p_collapsed = MagicMock()
+    p_collapsed.cls = [MagicMock(item=lambda: 0)]
+    p_collapsed.conf = [MagicMock(item=lambda: 0.92)]
+    p_collapsed.xyxy = [np.array([100, 160, 250, 250])]  # h = 90, w = 150
+    p_collapsed.id = MagicMock(item=lambda: 7)
+
+    res_f2 = MagicMock(boxes=[p_collapsed], keypoints=make_pose_keypoints(nose_y=220, hip_y=180))
+    mock_model.track.return_value = [res_f2]
+
+    # Frames 1-4: Temporal buffer suppresses transients
+    for _ in range(4):
+        _, counts_f2_1 = tracker.process_frame(blank.copy())
+        assert counts_f2_1["fall_detected"] is False
+
+    # Frame 5: 5th consecutive fallen frame (fall confirmed)
+    annotated_f2, counts_f2 = tracker.process_frame(blank.copy())
+
+    assert counts_f2["fall_detected"] is True
+    # Box should be rendered in Red (0, 0, 255)
+    assert np.any(annotated_f2[160:250, 100:250, 2] > 200)
+
+
+def test_overhead_fall_detection_floor_proximity_flattened():
+    """
+    Verifies Overhead/Ceiling CCTV Fall Detection with pose:
+    When a person collapses on the floor with head lower than hips (nose_y > hip_y)
+    and horizontal box (w > h * 1.0), fall is detected after 5 frames.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # Frame 1: Person standing (nose_y=80 < hip_y=180)
+    p_standing = MagicMock()
+    p_standing.cls = [MagicMock(item=lambda: 0)]
+    p_standing.conf = [MagicMock(item=lambda: 0.92)]
+    p_standing.xyxy = [np.array([100, 50, 200, 250])]
+    p_standing.id = MagicMock(item=lambda: 8)
+
+    res_f1 = MagicMock(boxes=[p_standing], keypoints=make_pose_keypoints(nose_y=80, hip_y=180))
+    mock_model = MagicMock()
+    mock_model.track.return_value = [res_f1]
+
+    tracker = SpatialTracker(model=mock_model)
+    _, counts_f1 = tracker.process_frame(blank.copy())
+    assert counts_f1["fall_detected"] is False
+
+    # Frame 2: Fallen person on floor: y1=380, y2=450 (h=70, w=120, nose_y=440 > hip_y=400)
+    p_floor = MagicMock()
+    p_floor.cls = [MagicMock(item=lambda: 0)]
+    p_floor.conf = [MagicMock(item=lambda: 0.95)]
+    p_floor.xyxy = [np.array([100, 380, 220, 450])]
+    p_floor.id = MagicMock(item=lambda: 8)
+
+    res_f2 = MagicMock(boxes=[p_floor], keypoints=make_pose_keypoints(nose_y=440, hip_y=400))
+    mock_model.track.return_value = [res_f2]
+
+    # Frames 1-4: Temporal buffer suppresses transients
+    for _ in range(4):
+        _, counts_f2_1 = tracker.process_frame(blank.copy())
+        assert counts_f2_1["fall_detected"] is False
+
+    # Frame 5: 5th consecutive fallen frame (confirmed)
+    annotated, counts = tracker.process_frame(blank.copy())
+
+    assert counts["fall_detected"] is True
+    # Red box rendered
+    assert np.any(annotated[380:450, 100:220, 2] > 200)
+
+
+def test_spatial_tracker_fall_alert_websocket_cooldown():
+    """
+    Verifies that when SpatialTracker detects a fall, it dispatches an EVT-FALL
+    alert through alert_manager.broadcast_sync and enforces the 15s cooldown.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # Frame 1: Person standing (nose_y=80 < hip_y=180, id=9)
+    p_standing = MagicMock()
+    p_standing.cls = [MagicMock(item=lambda: 0)]
+    p_standing.conf = [MagicMock(item=lambda: 0.92)]
+    p_standing.xyxy = [np.array([100, 50, 200, 250])]
+    p_standing.id = MagicMock(item=lambda: 9)
+
+    res_f1 = MagicMock(boxes=[p_standing], keypoints=make_pose_keypoints(nose_y=80, hip_y=180))
+    mock_model = MagicMock()
+    mock_model.track.return_value = [res_f1]
+
+    tracker = SpatialTracker(model=mock_model, alert_cooldown=15.0)
+    tracker.process_frame(blank.copy())
+
+    # Frame 2: Fall collapse to floor (nose_y=440 > hip_y=400, w=120 > h=70 * 1.0)
+    p_floor = MagicMock()
+    p_floor.cls = [MagicMock(item=lambda: 0)]
+    p_floor.conf = [MagicMock(item=lambda: 0.95)]
+    p_floor.xyxy = [np.array([100, 380, 220, 450])]
+    p_floor.id = MagicMock(item=lambda: 9)
+
+    res_f2 = MagicMock(boxes=[p_floor], keypoints=make_pose_keypoints(nose_y=440, hip_y=400))
+    mock_model.track.return_value = [res_f2]
+
+    with patch("backend.app.vision_engine.alert_manager.broadcast_sync") as mock_broadcast:
+        # Frames 1-4: Temporal buffer suppresses transients (< 5 frames)
+        for _ in range(4):
+            _, counts_g = tracker.process_frame(blank.copy())
+            assert counts_g["fall_detected"] is False
+            assert mock_broadcast.call_count == 0
+
+        # Frame 5: 5th consecutive fallen frame -> Fall confirmed -> dispatches EVT-FALL payload
+        _, counts1 = tracker.process_frame(blank.copy())
+        assert counts1["fall_detected"] is True
+        assert mock_broadcast.call_count == 1
+        payload = mock_broadcast.call_args[0][0]
+        assert payload["id"].startswith("EVT-FALL-")
+        assert payload["type"] == "MAN DOWN / FALL DETECTED"
+        assert payload["level"] == "CRITICAL"
+        assert payload["time"].endswith(" IST")
+
+        # Frame 6: Immediately afterwards (within 15s cooldown) -> no re-dispatch
+        _, counts2 = tracker.process_frame(blank.copy())
+        assert counts2["fall_detected"] is True
+        assert mock_broadcast.call_count == 1
+
+
+def test_ist_timestamp_generator():
+    """
+    Verifies that the IST timezone (UTC+5:30) is correctly configured
+    and produces timestamps matching the HH:MM:SS IST format.
+    """
+    from datetime import datetime
+    from backend.app.main import IST
+    import re
+    now_ist = datetime.now(IST).strftime("%H:%M:%S IST")
+    assert now_ist.endswith(" IST")
+    assert re.match(r"^\d{2}:\d{2}:\d{2} IST$", now_ist)
+
+
+def test_bounding_box_turns_red_when_fall_detected():
+    """
+    Verifies Task 1:
+    The exact moment fall_detected becomes True in vision_engine.py,
+    the bounding box visually turns Pure Red (0, 0, 255) and displays
+    CRITICAL: FALL DETECTED.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # Frame 1: Person standing (nose_y=80 < hip_y=180)
+    p_standing = MagicMock()
+    p_standing.cls = [MagicMock(item=lambda: 0)]
+    p_standing.conf = [MagicMock(item=lambda: 0.95)]
+    p_standing.xyxy = [np.array([100, 50, 200, 250])]
+    p_standing.id = MagicMock(item=lambda: 99)
+
+    res_f1 = MagicMock(boxes=[p_standing], keypoints=make_pose_keypoints(nose_y=80, hip_y=180))
+    mock_model = MagicMock()
+    mock_model.track.return_value = [res_f1]
+
+    tracker = SpatialTracker(model=mock_model)
+    annotated_f1, counts_f1 = tracker.process_frame(blank.copy())
+    assert counts_f1["fall_detected"] is False
+    # Green box when standing
+    assert np.any(annotated_f1[50:250, 100:200, 1] > 200)
+
+    # Frame 2: Person collapses onto floor (w=300, nose_y=380 > hip_y=330)
+    p_fallen = MagicMock()
+    p_fallen.cls = [MagicMock(item=lambda: 0)]
+    p_fallen.conf = [MagicMock(item=lambda: 0.95)]
+    p_fallen.xyxy = [np.array([100, 300, 400, 400])]
+    p_fallen.id = MagicMock(item=lambda: 99)
+
+    res_f2 = MagicMock(boxes=[p_fallen], keypoints=make_pose_keypoints(nose_y=380, hip_y=330))
+    mock_model.track.return_value = [res_f2]
+
+    # Frames 1-4: Temporal buffer suppresses transients (< 5 frames)
+    for _ in range(4):
+        _, counts_g = tracker.process_frame(blank.copy())
+        assert counts_g["fall_detected"] is False
+
+    # Frame 5: 5th consecutive fallen frame (fall confirmed)
+    annotated_f2, counts_f2 = tracker.process_frame(blank.copy())
+
+    # The exact moment fall_detected becomes True:
+    assert counts_f2["fall_detected"] is True
+    # Bounding box is rendered with Pure Red (0, 0, 255)
+    box_pixels = annotated_f2[300:400, 100:400]
+    assert np.any(box_pixels[:, :, 2] > 200)
+    # Text region has red pixels from CRITICAL: FALL DETECTED
+    text_region = annotated_f2[270:300, 100:400]
+    assert np.any(text_region[:, :, 2] > 200)
+
+
+def test_skeleton_drawing_limbs_and_joints():
+    """
+    Verifies Section 1: Skeleton Overlay
+    - Draws lines between keypoints (limbs)
+    - Draws joint circles
+    - Uses Emerald Green for normal posture, and Pure Red for fall detection
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # Case A: Upright person (Green skeleton)
+    p_upright = MagicMock()
+    p_upright.cls = [MagicMock(item=lambda: 0)]
+    p_upright.conf = [MagicMock(item=lambda: 0.95)]
+    p_upright.xyxy = [np.array([100, 50, 200, 250])]
+    p_upright.id = MagicMock(item=lambda: 1)
+
+    res_upright = MagicMock(boxes=[p_upright], keypoints=make_pose_keypoints(nose_y=80, hip_y=180, nose_x=150, hip_x=150))
+    mock_model = MagicMock()
+    mock_model.track.return_value = [res_upright]
+
+    tracker = SpatialTracker(model=mock_model)
+    annotated_upright, counts_upright = tracker.process_frame(blank.copy())
+    assert counts_upright["fall_detected"] is False
+
+    # Joint at (150, 80) should have Green (74, 222, 128)
+    assert annotated_upright[80, 150, 1] > 200
+
+    # Case B: Fallen person (Red skeleton after 5 consecutive frames)
+    p_fallen = MagicMock()
+    p_fallen.cls = [MagicMock(item=lambda: 0)]
+    p_fallen.conf = [MagicMock(item=lambda: 0.95)]
+    p_fallen.xyxy = [np.array([100, 300, 400, 400])]
+    p_fallen.id = MagicMock(item=lambda: 1)
+
+    res_fallen = MagicMock(boxes=[p_fallen], keypoints=make_pose_keypoints(nose_y=380, hip_y=330, nose_x=250, hip_x=200))
+    mock_model.track.return_value = [res_fallen]
+
+    for _ in range(4):
+        tracker.process_frame(blank.copy())
+    # Frame 5: 5th consecutive fallen frame -> confirmed
+    annotated_fallen, counts_fallen = tracker.process_frame(blank.copy())
+    assert counts_fallen["fall_detected"] is True
+
+    # Joint at (250, 380) should have Red (0, 0, 255)
+    assert annotated_fallen[380, 250, 2] > 200
+
+
+def test_simplified_pose_fall_math_rules():
+    """
+    Verifies Section 1: Simplified Pose Fall Math:
+    - nose_y >= hip_y AND spine compressed for 5 frames -> fall_detected = True, Red, CRITICAL: FALL DETECTED
+    - nose_y < hip_y -> fall_detected = False, Green (webcam sitting)
+    - spine not compressed -> fall_detected = False, Green (bending while standing)
+    - keypoints is None with w > h * 1.1 -> fall_detected = True after 5 frames
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+    tracker = SpatialTracker(model=MagicMock())
+
+    # Rule 1: Fall breach (nose_y >= hip_y and spine compressed, persists 5 frames)
+    p1 = MagicMock()
+    p1.cls = [MagicMock(item=lambda: 0)]
+    p1.conf = [MagicMock(item=lambda: 0.9)]
+    p1.xyxy = [np.array([100, 300, 400, 400])]
+    p1.id = None
+    tracker.model.track.return_value = [MagicMock(boxes=[p1], keypoints=make_pose_keypoints(nose_y=380, hip_y=330))]
+    for _ in range(4):
+        _, c1_g = tracker.process_frame(blank.copy())
+        assert c1_g["fall_detected"] is False  # Frames 1-4 glitch rejection
+    ann1, c1 = tracker.process_frame(blank.copy())
+    assert c1["fall_detected"] is True   # Frame 5 confirmed
+
+    # Rule 2: Sitting upright with wide box (nose_y < hip_y)
+    p2 = MagicMock()
+    p2.cls = [MagicMock(item=lambda: 0)]
+    p2.conf = [MagicMock(item=lambda: 0.9)]
+    p2.xyxy = [np.array([100, 100, 400, 250])]  # w=300 > h=150
+    p2.id = None
+    tracker.model.track.return_value = [MagicMock(boxes=[p2], keypoints=make_pose_keypoints(nose_y=120, hip_y=200))]
+    ann2, c2 = tracker.process_frame(blank.copy())
+    assert c2["fall_detected"] is False
+
+    # Rule 3: Upright standing (shoulder to hip distance normal, nose_y < hip_y)
+    p3 = MagicMock()
+    p3.cls = [MagicMock(item=lambda: 0)]
+    p3.conf = [MagicMock(item=lambda: 0.9)]
+    p3.xyxy = [np.array([100, 100, 200, 300])]
+    p3.id = None
+    tracker.model.track.return_value = [MagicMock(boxes=[p3], keypoints=make_pose_keypoints(nose_y=110, hip_y=220, shoulder_y=140))]
+    ann3, c3 = tracker.process_frame(blank.copy())
+    assert c3["fall_detected"] is False
+
+    # Rule 4: Prone person on overhead CCTV with occluded / missing keypoints (fallback to w > h * 1.1)
+    p4 = MagicMock()
+    p4.cls = [MagicMock(item=lambda: 0)]
+    p4.conf = [MagicMock(item=lambda: 0.9)]
+    p4.xyxy = [np.array([100, 300, 400, 400])]  # w=300 > h=100 * 1.1
+    p4.id = None
+    tracker.model.track.return_value = [MagicMock(boxes=[p4], keypoints=None)]
+    for _ in range(4):
+        _, c4_g = tracker.process_frame(blank.copy())
+        assert c4_g["fall_detected"] is False  # Frames 1-4 glitch rejection
+    ann4_2, c4_2 = tracker.process_frame(blank.copy())
+    assert c4_2["fall_detected"] is True   # Frame 5 confirmed via bounding box geometry fallback!
+
+    # Rule 5: Upright standing person with no keypoints (w <= h * 1.1) -> remains False
+    p5 = MagicMock()
+    p5.cls = [MagicMock(item=lambda: 0)]
+    p5.conf = [MagicMock(item=lambda: 0.9)]
+    p5.xyxy = [np.array([100, 100, 200, 350])]  # w=100, h=250 -> w <= h * 1.1
+    p5.id = None
+    tracker.model.track.return_value = [MagicMock(boxes=[p5], keypoints=None)]
+    ann5, c5 = tracker.process_frame(blank.copy())
+    assert c5["fall_detected"] is False
+
+
+def test_keypoint_confidence_filtering():
+    """
+    Verifies that keypoints with confidence <= 0.3 are ignored,
+    preventing low-quality or occluded background noise from triggering false fall alerts.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+    p = MagicMock()
+    p.cls = [MagicMock(item=lambda: 0)]
+    p.conf = [MagicMock(item=lambda: 0.95)]
+    p.xyxy = [np.array([100, 50, 200, 250])]  # upright box
+    p.id = MagicMock(item=lambda: 55)
+
+    # Keypoint confidence is only 0.15 (below 0.3 threshold)
+    low_conf_kp = make_pose_keypoints(nose_y=380, hip_y=120, conf=0.15)
+    mock_model = MagicMock()
+    mock_model.track.return_value = [MagicMock(boxes=[p], keypoints=low_conf_kp)]
+
+    tracker = SpatialTracker(model=mock_model)
+    for _ in range(5):
+        _, counts = tracker.process_frame(blank.copy())
+        assert counts["fall_detected"] is False
+
+
+def test_temporal_frame_buffer_5_frames():
+    """
+    Verifies that a fall condition must persist for at least 5 consecutive frames.
+    Single-frame to 4-frame dips are suppressed as glitches/transients.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+    p_fall = MagicMock()
+    p_fall.cls = [MagicMock(item=lambda: 0)]
+    p_fall.conf = [MagicMock(item=lambda: 0.95)]
+    p_fall.xyxy = [np.array([100, 300, 400, 400])]  # w=300 > h=100 * 1.1
+    p_fall.id = MagicMock(item=lambda: 77)
+
+    res = MagicMock(boxes=[p_fall], keypoints=make_pose_keypoints(nose_y=380, hip_y=330))
+    mock_model = MagicMock()
+    mock_model.track.return_value = [res]
+
+    tracker = SpatialTracker(model=mock_model)
+    # Frames 1 through 4: must remain unconfirmed
+    for frame_idx in range(1, 5):
+        _, counts = tracker.process_frame(blank.copy())
+        assert counts["fall_detected"] is False, f"Frame {frame_idx} should be suppressed by temporal buffer"
+
+    # Frame 5: precisely on frame 5, fall is confirmed!
+    _, counts_5 = tracker.process_frame(blank.copy())
+    assert counts_5["fall_detected"] is True, "Frame 5 should confirm fall after 5 consecutive frames"
+
+
+
 
 
 

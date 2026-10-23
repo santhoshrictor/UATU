@@ -1,6 +1,9 @@
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
 from pathlib import Path
 import pickle
 import sys
@@ -197,6 +200,8 @@ class CameraDeviceWorker:
         self.tracker = SpatialTracker()
         self.last_crowd_alert_time = 0.0
         self.crowd_alert_cooldown = 15.0
+        self.last_fall_alert_time = 0.0
+        self.fall_alert_cooldown = 15.0
 
     def _open_capture(self):
         try:
@@ -242,7 +247,7 @@ class CameraDeviceWorker:
                 consecutive_errors = 0
                 self.is_live = True
 
-                # Feature 1-4, 15-16 (ByteTrack, Virtual Tripwire, Contextual Occupancy HUD)
+                # Feature 1-4, 15-17 (ByteTrack, Tripwire, Occupancy HUD, Fall Detection)
                 annotated_frame, counts = self.tracker.process_frame(frame)
 
                 # Feature 15 WebSocket Alert Engine: dispatch when is_crowded with 15s cooldown
@@ -252,7 +257,7 @@ class CameraDeviceWorker:
                         self.last_crowd_alert_time = now_ts
                         alert_payload = {
                             "id": f"EVT-CROWD-{int(now_ts)}",
-                            "time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+                            "time": datetime.now(IST).strftime("%H:%M:%S IST"),
                             "zone": "Live Monitoring Zone",
                             "type": "ABNORMAL GATHERING",
                             "level": "CRITICAL",
@@ -263,6 +268,25 @@ class CameraDeviceWorker:
                             f"WebSocket Alert Fired from Device {self.device_id}: {alert_payload}"
                         )
                         alert_manager.broadcast_sync(alert_payload)
+
+                # Feature 17 Fall Detection: dispatch when fall_detected with 15s cooldown
+                if counts.get("fall_detected"):
+                    now_ts = time.time()
+                    if (now_ts - self.last_fall_alert_time) >= self.fall_alert_cooldown:
+                        self.last_fall_alert_time = now_ts
+                        fall_payload = {
+                            "id": f"EVT-FALL-{int(now_ts)}",
+                            "time": datetime.now(IST).strftime("%H:%M:%S IST"),
+                            "zone": "Live Monitoring Zone",
+                            "type": "MAN DOWN / FALL DETECTED",
+                            "level": "CRITICAL",
+                            "detail": "Worker fall detected based on skeletal pose geometry. Immediate assistance required.",
+                            "acknowledged": False,
+                        }
+                        logger.warning(
+                            f"WebSocket Fall Alert Fired from Device {self.device_id}: {fall_payload}"
+                        )
+                        alert_manager.broadcast_sync(fall_payload)
 
                 _, encoded = cv2.imencode(
                     ".jpg", annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
@@ -517,6 +541,8 @@ async def generate_file_stream(file_path: Path, overlay_label: str = "FEED"):
         fps = cap.get(cv2.CAP_PROP_FPS)
         delay = 1.0 / fps if fps and fps > 0 else 0.04
         tracker = SpatialTracker()
+        last_fall_alert_time = 0.0
+        fall_alert_cooldown = 15.0
 
         while True:
             ret, frame = cap.read()
@@ -535,12 +561,31 @@ async def generate_file_stream(file_path: Path, overlay_label: str = "FEED"):
                     await asyncio.sleep(0.5)
                     continue
 
-            # 1. Run AI Inference (YOLO11 ByteTrack & Tripwire)
-            counts = {"persons": 0, "vehicles": 0, "entry": 0, "exit": 0}
+            # 1. Run AI Inference (YOLO11 ByteTrack & Tripwire & Fall Detection)
+            counts = {"persons": 0, "vehicles": 0, "entry": 0, "exit": 0, "fall_detected": False}
             try:
                 frame, counts = tracker.process_frame(frame)
             except Exception:
                 pass  # Fail silently and keep streaming if AI throws an error
+
+            # Feature 17 Fall Detection: check fall_detected with 15s cooldown
+            if counts.get("fall_detected"):
+                now_ts = time.time()
+                if (now_ts - last_fall_alert_time) >= fall_alert_cooldown:
+                    last_fall_alert_time = now_ts
+                    fall_payload = {
+                        "id": f"EVT-FALL-{int(now_ts)}",
+                        "time": datetime.now(IST).strftime("%H:%M:%S IST"),
+                        "zone": "Live Monitoring Zone",
+                        "type": "MAN DOWN / FALL DETECTED",
+                        "level": "CRITICAL",
+                        "detail": "Worker fall detected based on skeletal pose geometry. Immediate assistance required.",
+                        "acknowledged": False,
+                    }
+                    logger.warning(
+                        f"WebSocket Fall Alert Fired from File Stream: {fall_payload}"
+                    )
+                    alert_manager.broadcast_sync(fall_payload)
 
             # 2. Encode clean annotated frame directly
             _, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
@@ -926,7 +971,7 @@ async def verify_access(payload: VerifyAccessRequest):
         "employee_id": employee_id,
         "roll": db_roll,
         "zone": f"Zone 01 // Device {payload.device_id}",
-        "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+        "timestamp": datetime.now(IST).strftime("%H:%M:%S IST"),
     }
 
 
