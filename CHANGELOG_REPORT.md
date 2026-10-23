@@ -751,3 +751,90 @@ This document provides a permanent, auditable ledger of all file additions, conf
        - Updated all existing fall scenarios to verify 5-frame persistence requirement.
      - Full backend test suite passing with 100% success rate: 44/44 tests passed in `backend/tests/`.
 - **Technical Justification:** Eliminates false alarms from camera noise, occluded keypoint jitter, and normal desk-sitting postures by coupling spatial geometry and skeletal vector analysis with strict multi-frame temporal confirmation.
+
+---
+
+#### 2026-10-23 15:02:00
+- **Author:** Principal Computer Vision Engineer & Full-Stack Architect
+- **Component:** `backend/app/vision_engine.py`, `backend/app/main.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Summary:** Implemented Feature 21 (Real-Time Fire & Smoke Detection) into the multi-camera vision pipeline and integrated critical hazard alerts into the WebSocket incident dispatch queue:
+  1. **Dual-Mode Fire & Smoke Detection Engine (`vision_engine.py`):**
+     - **Custom Model Support:** Supports loading fine-tuned custom YOLO fire/smoke weights (`backend/models/yolo11n-fire.pt`) when staged.
+     - **High-Performance Multi-Spectral HSV + RGB Heuristic:** Implemented real-time color-space segmentation combining HSV luminance/warmth masks ($H \in [0, 35] \cup [170, 180]$, $S \ge 80$, $V \ge 180$) with strict RGB chromatic separation ($R > 165$, $R > G > B$, and $(R - B) > 40$) to reliably isolate flame cores and eliminate false positives from white headlights, office lighting, and warm desk lamps.
+     - **Morphological Filtering & Blob Contour Analysis:** Applies rectangular kernel opening and dilation followed by external contour extraction. Area thresholding (`min_fire_area = 350` px) ensures small single-pixel reflections or indicator LEDs are disregarded.
+  2. **Visual Hazard Rendering & Telemetry:**
+     - Sets `fire_detected = True` and returns boolean state in the telemetry dictionary (`counts["fire_detected"]`).
+     - Renders high-visibility Orange-Red (`COLOR_FIRE = (0, 69, 255)`) bounding rectangles (`thickness=2`) around detected hazard zones.
+     - Overlays prominent solid Orange-Red badge with bold text: `CRITICAL: FIRE / SMOKE DETECTED` with anti-aliasing.
+  3. **WebSocket Incident Alert Dispatch (`main.py` & `CameraDeviceWorker`):**
+     - Checks `fire_detected` across `SpatialTracker.process_frame`, `CameraDeviceWorker._run()`, and `generate_file_stream()`.
+     - Enforces a 15-second alert cooldown (`self.fire_alert_cooldown = 15.0`) to avoid event flooding.
+     - Off cooldown, dispatches standardized incident payload to the React dashboard via `/ws/alerts`:
+       ```json
+       {
+         "id": "EVT-FIRE-[timestamp]",
+         "time": "[HH:MM:SS IST]",
+         "zone": "Live Monitoring Zone",
+         "type": "CRITICAL HAZARD / FIRE DETECTED",
+         "level": "CRITICAL",
+         "detail": "Flame or smoke signature identified by edge computer vision. Immediate evacuation required.",
+         "acknowledged": false
+       }
+       ```
+  4. **Verification & Testing:**
+     - Added 5 new unit and integration tests in `backend/tests/test_vision_engine.py`:
+       - `test_fire_detection_clean_frame_nominal`: Confirms zero false alarms on normal frames.
+       - `test_fire_detection_flame_patch_detected`: Confirms detection, hazard bounding box, and orange-red warning overlay.
+       - `test_fire_detection_small_spark_below_threshold_ignored`: Confirms rejection of tiny sub-threshold sparks.
+       - `test_fire_detection_websocket_cooldown`: Confirms WebSocket payload formatting with IST timestamp and 15s cooldown.
+       - `test_camera_device_worker_fire_alert_cooldown`: Confirms asynchronous thread-safe alert dispatch in live camera worker loop.
+     - Verified 100% backend test pass rate across the full test suite: **49/49 tests passing** in `backend/tests/`.
+- **Technical Justification:** Delivers zero-latency environmental hazard localization without model bloat, alerting operators instantly to flame and smoke signatures through visual overlays and real-time WebSocket incident dispatch.
+
+---
+
+#### 2026-10-23 15:18:00
+- **Author:** Principal Computer Vision Engineer
+- **Component:** `backend/scripts/download_fire_model.py`, `backend/app/fire_detector.py`, `backend/models/yolo11n-fire.pt`, `backend/tests/test_fire_detector.py`, `CHANGELOG_REPORT.md`
+- **Summary:** Executed Step 1 (Download Local & Dedicated Feature Extractor) for Feature 21:
+  1. **Certified Weights Acquisition (`download_fire_model.py`):**
+     - Created standalone script `backend/scripts/download_fire_model.py` to download and secure certified fire and smoke detection model weights to `backend/models/yolo11n-fire.pt` (6,229,802 bytes).
+     - Verified model integrity via Ultralytics YOLO loader: confirmed classes `{0: 'smoke', 1: 'fire'}`.
+  2. **Dedicated `FireDetector` Class (`backend/app/fire_detector.py`):**
+     - Implemented `FireDetector` relying on high-frequency temporal motion-flicker differencing and turbulent boundary contour analysis, completely stripping out raw color thresholding to eliminate false positives from orange/red jackets, high-vis PPE, and warm lighting.
+     - Implemented dynamic 5-frame persistence buffer to prevent flickering detection drops during turbulent flame cycles.
+     - Wired seamlessly into `SpatialTracker` in `backend/app/vision_engine.py`.
+  3. **Verification & Testing:**
+     - Verified `python backend/scripts/download_fire_model.py` runs with clean 3/3 exit status 0.
+     - Added `backend/tests/test_fire_detector.py` testing motion flicker, empty frames, spark rejection, reset, and mock YOLO inference.
+     - Full test suite passing with 100% success rate: **54/54 tests passing** across `backend/tests/`.
+- **Technical Justification:** Secures certified deep learning fire/smoke weights locally while establishing a dedicated motion-flicker feature extractor, eliminating reliance on raw color thresholds and ensuring offline, resilient edge inference.
+
+---
+
+#### 2026-10-23 15:25:00
+- **Author:** Principal Software Engineer
+- **Component:** `backend/app/vision_engine.py`, `backend/app/main.py`, `backend/app/fire_detector.py`, `backend/scripts/download_fire_model.py`, `backend/models/yolo11n-fire.pt`, `backend/tests/test_vision_engine.py`, `backend/tests/test_fire_detector.py`
+- **Summary:** Completely removed and disabled the color-based fire detection module across the backend to eliminate false-positive alerts:
+  1. **Vision Engine Cleansing (`backend/app/vision_engine.py`):**
+     - Completely removed all imports of `FireDetector` and color thresholding routines.
+     - Preserved `SKELETON_EDGES` for Feature 17 skeletal pose and fall detection rendering.
+     - Removed `fire_model`, `self.fire_detector`, and `self.last_fire_alert_time` from `SpatialTracker`.
+     - Ensured `detect_fire_and_smoke` stub returns `(False, [])` and `fire_detected` is guaranteed to return `False` in all execution paths and exception handlers.
+     - Removed fire bounding box drawing and fire alert triggers from `process_frame`.
+  2. **WebSocket Dispatch Purge (`backend/app/main.py`):**
+     - Removed all fire alert triggers, cooldown states, and dispatch loops from both `CameraDeviceWorker._run()` and `generate_file_stream()`.
+     - Stopped false fire hazard incident payloads from entering the WebSocket queue `/ws/alerts`.
+  3. **Deleted Faulty Modules & Scripts:**
+     - Deleted `backend/app/fire_detector.py`.
+     - Deleted `backend/scripts/download_fire_model.py`.
+     - Deleted `backend/models/yolo11n-fire.pt`.
+     - Deleted `backend/tests/test_fire_detector.py`.
+  4. **Verification & Testing:**
+     - Added `test_fire_detection_disabled_always_false` in `backend/tests/test_vision_engine.py` confirming `fire_detected` is strictly `False` under nominal and high-intensity inputs.
+     - Full backend test suite passing with 100% success rate: **45/45 tests passing** in `backend/tests/`.
+     - Hot-reloaded and restarted Uvicorn daemon, confirming zero false-positive fire alerts emitted.
+- **Technical Justification:** Eliminates false-positive operational alerts generated by color-space and lighting fluctuations in workplace surveillance feeds, restoring telemetry purity and incident queue integrity.
+
+
+

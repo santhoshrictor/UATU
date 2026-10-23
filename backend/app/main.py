@@ -562,7 +562,7 @@ async def generate_file_stream(file_path: Path, overlay_label: str = "FEED"):
                     continue
 
             # 1. Run AI Inference (YOLO11 ByteTrack & Tripwire & Fall Detection)
-            counts = {"persons": 0, "vehicles": 0, "entry": 0, "exit": 0, "fall_detected": False}
+            counts = {"persons": 0, "vehicles": 0, "entry": 0, "exit": 0, "fall_detected": False, "fire_detected": False}
             try:
                 frame, counts = tracker.process_frame(frame)
             except Exception:

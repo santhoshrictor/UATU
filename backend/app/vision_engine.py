@@ -14,7 +14,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 logger = logging.getLogger(__name__)
 
 COLOR_TRIPWIRE = (0, 215, 255)
-
+ 
 # Standard COCO 17-keypoint skeleton connections for pose rendering
 SKELETON_EDGES = [
     (0, 1), (0, 2), (1, 3), (2, 4),      # Facial / Head
@@ -30,7 +30,15 @@ SKELETON_EDGES = [
 
 
 class SpatialTracker:
-    def __init__(self, model=None, zone_pts=None, zone_threshold=4, alert_cooldown=15.0, fall_confirmation_threshold=5):
+    def __init__(
+        self,
+        model=None,
+        zone_pts=None,
+        zone_threshold=4,
+        alert_cooldown=15.0,
+        fall_confirmation_threshold=5,
+        **kwargs,
+    ):
         if model is not None:
             self.model = model
         else:
@@ -75,11 +83,16 @@ class SpatialTracker:
         self.track_heights = {}
         self.track_center_y = {}
 
+    def detect_fire_and_smoke(self, frame: np.ndarray):
+        """Disabled: Fire detection module removed to eliminate false positives."""
+        return False, []
+
     def process_frame(self, frame):
         persons_count = 0
         vehicles_count = 0
         occupancy_count = 0
         fall_detected = False
+        fire_detected = False
         is_crowded = False
 
         if frame is None or not isinstance(frame, np.ndarray):
@@ -93,6 +106,7 @@ class SpatialTracker:
                 "is_crowded": False,
                 "gathering_alert": False,
                 "fall_detected": False,
+                "fire_detected": False,
             }
 
         try:
@@ -555,6 +569,7 @@ class SpatialTracker:
                 "is_crowded": is_crowded,
                 "gathering_alert": is_crowded,
                 "fall_detected": fall_detected,
+                "fire_detected": False,
             }
 
         except Exception as e:
@@ -571,6 +586,7 @@ class SpatialTracker:
                 "is_crowded": False,
                 "gathering_alert": False,
                 "fall_detected": False,
+                "fire_detected": False,
             }
 
     def reset(self):

@@ -1,4 +1,5 @@
 from unittest.mock import MagicMock, patch
+import threading
 import numpy as np
 
 from backend.app.vision_engine import (
@@ -1065,6 +1066,26 @@ def test_temporal_frame_buffer_5_frames():
     # Frame 5: precisely on frame 5, fall is confirmed!
     _, counts_5 = tracker.process_frame(blank.copy())
     assert counts_5["fall_detected"] is True, "Frame 5 should confirm fall after 5 consecutive frames"
+
+
+def test_fire_detection_disabled_always_false():
+    """
+    Verifies that the fire detection module is disabled and fire_detected is always False
+    to eliminate false-positive alerts.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+    mock_model = MagicMock()
+    mock_model.track.return_value = [MagicMock(boxes=[])]
+    tracker = SpatialTracker(model=mock_model)
+    _, counts = tracker.process_frame(blank)
+    assert counts["fire_detected"] is False
+
+    # Even with flame-like input, fire_detected remains safely False
+    flame_frame = np.full((480, 640, 3), 255, dtype=np.uint8)
+    _, counts_flame = tracker.process_frame(flame_frame)
+    assert counts_flame["fire_detected"] is False
+
+
 
 
 
