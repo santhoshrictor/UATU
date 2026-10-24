@@ -13,9 +13,29 @@ class AlertConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._stream_status: Dict[str, bool] = {}
 
     def set_event_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
+
+    def set_stream_status(self, camera_id: str, is_active: bool):
+        """Registers the health/activity status of a camera stream."""
+        self._stream_status[camera_id] = bool(is_active)
+
+    def is_stream_active(self, camera_id: str) -> bool:
+        """
+        Returns True if the camera stream is currently active with valid live frames.
+        Returns False if the stream is offline, unassigned, or rendering STREAM OFFLINE.
+        """
+        return self._stream_status.get(camera_id, True)
+
+    def pause_stream_dispatch(self, camera_id: str):
+        """Circuit breaker: completely pauses/stops alert dispatch for the specified camera."""
+        self._stream_status[camera_id] = False
+
+    def resume_stream_dispatch(self, camera_id: str):
+        """Circuit breaker: resumes alert dispatch once valid live frames pass inference."""
+        self._stream_status[camera_id] = True
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -30,6 +50,15 @@ class AlertConnectionManager:
     async def broadcast(self, message: Dict[str, Any]):
         if not self.active_connections:
             return
+
+        # Circuit Breaker: Kill event dispatch for offline, unassigned, or invalid camera streams
+        cam = message.get("camera")
+        if cam and not self.is_stream_active(cam):
+            logger.warning(
+                f"Circuit Breaker: Alert {message.get('id')} suppressed because {cam} is OFFLINE / INACTIVE."
+            )
+            return
+
         payload = json.dumps(message)
         dead_connections = []
         for connection in self.active_connections:
@@ -45,6 +74,15 @@ class AlertConnectionManager:
         """Thread-safe synchronous broadcast dispatchable from background worker threads."""
         if not self.active_connections:
             return
+
+        # Circuit Breaker: Kill event dispatch for offline, unassigned, or invalid camera streams
+        cam = message.get("camera")
+        if cam and not self.is_stream_active(cam):
+            logger.warning(
+                f"Circuit Breaker: Alert {message.get('id')} suppressed because {cam} is OFFLINE / INACTIVE."
+            )
+            return
+
         try:
             loop = self._loop
             if loop and loop.is_running():
@@ -54,7 +92,7 @@ class AlertConnectionManager:
                     cur_loop = asyncio.get_running_loop()
                     cur_loop.create_task(self.broadcast(message))
                 except RuntimeError:
-                    pass
+                    asyncio.run(self.broadcast(message))
         except Exception as e:
             logger.error(f"Error in AlertConnectionManager.broadcast_sync: {e}")
 

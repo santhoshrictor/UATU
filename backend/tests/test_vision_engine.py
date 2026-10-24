@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 import threading
 import numpy as np
 
@@ -9,13 +9,18 @@ from backend.app.vision_engine import (
 
 
 def test_process_spatial_frame_none_or_empty():
-    tracker = SpatialTracker(model=None)
+    tracker = SpatialTracker(model=None, camera_id="CAM-03", zone="Logistics Yard")
     frame, counts = tracker.process_frame(None)
-    assert frame is None
+    assert frame is not None
+    assert isinstance(frame, np.ndarray)
+    assert frame.shape == (480, 640, 3)
     assert counts["persons"] == 0
     assert counts["vehicles"] == 0
     assert counts["entry"] == 0
     assert counts["exit"] == 0
+    assert counts["stream_healthy"] is False
+    assert counts["fall_detected"] is False
+    assert counts["fire_detected"] is False
 
     blank = np.zeros((480, 640, 3), dtype=np.uint8)
     out_frame, counts = tracker.process_frame(blank)
@@ -24,6 +29,41 @@ def test_process_spatial_frame_none_or_empty():
     assert counts["vehicles"] >= 0
     assert counts["entry"] >= 0
     assert counts["exit"] >= 0
+    assert counts["stream_healthy"] is True
+
+
+def test_stream_health_guard_offline_frame_suppresses_alerts_and_resets_buffers():
+    tracker = SpatialTracker(model=None, camera_id="CAM-03", zone="Logistics Yard")
+    # Simulate lingering state
+    tracker.fall_counters[1] = 4
+    tracker.fall_consecutive_frames[1] = 4
+    tracker.untracked_fall_counter = 3
+    if tracker.fire_detector:
+        tracker.fire_detector.fire_consecutive_frames = 4
+
+    # Stream read failure (ret=False)
+    offline_frame, counts = tracker.process_frame(None, ret=False)
+    assert offline_frame.shape == (480, 640, 3)
+    assert counts["stream_healthy"] is False
+    assert counts["fall_detected"] is False
+    assert counts["fire_detected"] is False
+    assert counts["is_crowded"] is False
+
+    # Buffers purged
+    assert len(tracker.fall_counters) == 0
+    assert tracker.untracked_fall_counter == 0
+    if tracker.fire_detector:
+        assert tracker.fire_detector.fire_consecutive_frames == 0
+
+
+def test_stream_health_guard_empty_ndarray():
+    tracker = SpatialTracker(model=None)
+    empty = np.zeros((0, 0, 3), dtype=np.uint8)
+    offline_frame, counts = tracker.process_frame(empty, ret=True)
+    assert offline_frame.shape == (480, 640, 3)
+    assert counts["stream_healthy"] is False
+    assert counts["fall_detected"] is False
+    assert counts["fire_detected"] is False
 
 
 def test_process_spatial_frame_mock_detections():
@@ -1068,27 +1108,206 @@ def test_temporal_frame_buffer_5_frames():
     assert counts_5["fall_detected"] is True, "Frame 5 should confirm fall after 5 consecutive frames"
 
 
-def test_fire_detection_disabled_always_false():
+def test_fire_detection_clean_frame_nominal():
     """
-    Verifies that the fire detection module is disabled and fire_detected is always False
-    to eliminate false-positive alerts.
+    Verifies that on clean frames without fire or smoke signatures,
+    fire_detected is False.
     """
     blank = np.zeros((480, 640, 3), dtype=np.uint8)
     mock_model = MagicMock()
     mock_model.track.return_value = [MagicMock(boxes=[])]
-    tracker = SpatialTracker(model=mock_model)
+    mock_fire_model = MagicMock()
+    mock_fire_model.return_value = [MagicMock(boxes=[])]
+    mock_fire_model.names = {0: "smoke", 1: "fire"}
+    tracker = SpatialTracker(model=mock_model, fire_model=mock_fire_model)
     _, counts = tracker.process_frame(blank)
     assert counts["fire_detected"] is False
 
-    # Even with flame-like input, fire_detected remains safely False
-    flame_frame = np.full((480, 640, 3), 255, dtype=np.uint8)
-    _, counts_flame = tracker.process_frame(flame_frame)
-    assert counts_flame["fire_detected"] is False
+
+def test_webcam_bottom_edge_incomplete_body_guard():
+    """
+    Verifies Incomplete Body Guard on webcams:
+    When a person sits close to a desk webcam, their bounding box touches the bottom
+    edge of the frame (y2 >= height - 15) and appears wide (w > h * 1.3).
+    Fall detection MUST be completely disabled for that track ID.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)  # height=480
+
+    # Person sitting close to desk webcam: y2 = 475 (touches bottom edge of 480p frame)
+    # Box is wide (w = 350 > h = 200 * 1.3)
+    p_desk = MagicMock()
+    p_desk.cls = [MagicMock(item=lambda: 0)]
+    p_desk.conf = [MagicMock(item=lambda: 0.95)]
+    p_desk.xyxy = [np.array([100, 275, 450, 475])]  # y2=475 >= 480-15=465, w=350, h=200
+    p_desk.id = MagicMock(item=lambda: 88)
+
+    res = MagicMock(boxes=[p_desk], keypoints=None)
+    mock_model = MagicMock()
+    mock_model.track.return_value = [res]
+
+    tracker = SpatialTracker(model=mock_model)
+
+    # Over 10 consecutive frames, fall detection MUST remain False and counter 0
+    for frame_idx in range(10):
+        annotated, counts = tracker.process_frame(blank.copy())
+        assert counts["fall_detected"] is False, f"Frame {frame_idx} triggered false fall on desk webcam"
+        assert tracker.fall_counters.get(88, 0) == 0, "Fall counter must be reset to 0 by incomplete body guard"
+        # Bounding box must remain green, never red
+        assert np.any(annotated[275:475, 100:450, 1] > 200)
 
 
+def test_circuit_breaker_drops_alerts_for_offline_camera():
+    """
+    Verifies that when a camera is marked offline or rendered STREAM OFFLINE,
+    the circuit breaker in alert_manager immediately drops any dispatched alerts.
+    """
+    from backend.app.core.websocket_manager import alert_manager
+
+    # Explicitly pause / mark CAM-03 offline
+    alert_manager.pause_stream_dispatch("CAM-03")
+    assert alert_manager.is_stream_active("CAM-03") is False
+
+    from unittest.mock import AsyncMock
+    mock_ws = MagicMock()
+    mock_ws.send_text = AsyncMock()
+    alert_manager.active_connections = [mock_ws]
+
+    # Try broadcasting an alert for CAM-03
+    alert_payload = {
+        "id": "EVT-HAZARD-TEST-OFFLINE",
+        "camera": "CAM-03",
+        "type": "CRITICAL HAZARD: FIRE / SMOKE DETECTED",
+        "detail": "Test alert",
+    }
+    alert_manager.broadcast_sync(alert_payload)
+
+    # Must be dropped by circuit breaker! send_text must NEVER be called
+    assert mock_ws.send_text.call_count == 0
+
+    # Resume CAM-03 and verify alerts are permitted
+    alert_manager.resume_stream_dispatch("CAM-03")
+    assert alert_manager.is_stream_active("CAM-03") is True
+    alert_manager.broadcast_sync(alert_payload)
+    # When active, it passes through to send_text
+    assert mock_ws.send_text.call_count == 1
+    alert_manager.active_connections.clear()
 
 
+def test_circuit_breaker_stops_conflicting_workers():
+    """
+    Verifies that MultiFileStreamManager.get_worker stops any prior running worker
+    for the same camera ID when a new file or source is requested.
+    """
+    from pathlib import Path
+    from backend.app.main import multi_file_stream_manager
+
+    path1 = Path("test_vid_1.mp4")
+    path2 = Path("test_vid_2.mp4")
+
+    w1 = multi_file_stream_manager.get_worker(path1, camera_id="CAM-99")
+    assert w1.running is True
+
+    # Request new file for same camera_id
+    w2 = multi_file_stream_manager.get_worker(path2, camera_id="CAM-99")
+    assert w1.running is False, "Previous worker for CAM-99 must be stopped"
+    assert w2.running is True
+
+    # Cleanup
+    multi_file_stream_manager.stop_camera("CAM-99")
+    assert w2.running is False
 
 
+def test_fps_telemetry_offline_zero_and_active_calculated():
+    """
+    Verifies that:
+    1. Offline/unassigned streams (STREAM OFFLINE) report fps = 0.
+    2. Active valid streams calculate and pass real-time processing fps > 0.
+    """
+    tracker = SpatialTracker(camera_id="CAM-03", enable_fire_detection=False)
 
+    # 1. Offline frame check
+    offline_frame, offline_counts = tracker.process_frame(None, ret=False)
+    assert offline_counts["fps"] == 0
+    assert offline_counts["stream_healthy"] is False
+
+    # 2. Active frame check
+    valid_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    _, active_counts = tracker.process_frame(valid_frame, ret=True)
+    assert "fps" in active_counts
+    assert active_counts["fps"] > 0
+    assert active_counts["stream_healthy"] is True
+
+
+def test_cam06_hazard_alert_dispatch_and_cooldown():
+    """
+    Verifies CAM-06 hazard detection loop pushes WebSocket notification payload
+    when fire_detected or smoke_detected is True, and enforces the 15-second cooldown.
+    """
+    from backend.app.core.websocket_manager import alert_manager
+
+    mock_fire_det = MagicMock()
+    # Mock detection returning hazard confirmed
+    fire_box = {
+        "class_id": 0,
+        "class_name": "fire",
+        "confidence": 0.88,
+        "box": [100, 100, 200, 200],
+    }
+    mock_fire_det.detect.return_value = (np.zeros((480, 640, 3), dtype=np.uint8), True, [fire_box])
+    mock_fire_det.primary_hazard = "fire"
+
+    tracker = SpatialTracker(
+        camera_id="CAM-06",
+        zone="Zone 06 // Western Security Barrier",
+        is_webcam=False,
+        fire_model=mock_fire_det,
+    )
+    tracker.fire_detector = mock_fire_det
+
+    mock_ws = MagicMock()
+    mock_ws.send_text = AsyncMock()
+    alert_manager.active_connections.append(mock_ws)
+    alert_manager.resume_stream_dispatch("CAM-06")
+
+    try:
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        _, counts = tracker.process_frame(frame, ret=True)
+
+        assert counts["fire_detected"] is True
+        assert counts["stream_healthy"] is True
+        assert counts["fps"] > 0
+        assert mock_ws.send_text.call_count == 1
+
+        # Second frame immediately: within 15s cooldown -> send_text must NOT be called again
+        _, counts2 = tracker.process_frame(frame, ret=True)
+        assert mock_ws.send_text.call_count == 1
+
+        # Advance last_fire_alert_time by 16s -> cooldown expired -> alert must fire
+        tracker.last_fire_alert_time -= 16.0
+        _, counts3 = tracker.process_frame(frame, ret=True)
+        assert mock_ws.send_text.call_count == 2
+    finally:
+        alert_manager.active_connections.clear()
+
+
+def test_camera_telemetry_endpoint():
+    """
+    Verifies that /api/camera-telemetry returns all cameras, reporting 0 FPS for offline
+    and actual processing FPS for active streams.
+    """
+    from fastapi.testclient import TestClient
+    from backend.app.main import app
+
+    client = TestClient(app)
+    res = client.get("/api/camera-telemetry")
+    assert res.status_code == 200
+    data = res.json()
+
+    assert "CAM-01" in data
+    assert "CAM-03" in data
+    assert "CAM-05" in data
+    assert "CAM-06" in data
+    # Offline streams must explicitly report 0 FPS
+    assert data["CAM-04"]["fps"] == 0
+    assert data["CAM-04"]["is_online"] is False
 

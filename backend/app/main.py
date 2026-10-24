@@ -154,10 +154,10 @@ def generate_offline_frame(
 # =============================================================================
 
 
-def get_working_camera(preferred_indices=(1, 2, 0)):
+def get_working_camera(preferred_indices=(0, 1, 2)):
     """
     Attempts to initialize physical hardware cameras across multiple indices.
-    Prioritizes index 1 and 2 to explicitly bypass virtual webcam drivers (e.g. Iriun, OBS) on index 0.
+    Prioritizes index 0 for the physical laptop webcam (cv2.VideoCapture(0)).
     """
     for idx in preferred_indices:
         try:
@@ -174,7 +174,7 @@ def get_working_camera(preferred_indices=(1, 2, 0)):
                 if ret and test_frame is not None:
                     logger.info(
                         f"Hardware camera successfully acquired on index {idx} "
-                        f"({test_frame.shape[1]}x{test_frame.shape[0]}). Bypassed virtual driver on index 0."
+                        f"({test_frame.shape[1]}x{test_frame.shape[0]})."
                     )
                     return cap, idx
                 cap.release()
@@ -186,8 +186,18 @@ def get_working_camera(preferred_indices=(1, 2, 0)):
 class CameraDeviceWorker:
     """Thread-safe capture worker for a specific video hardware/virtual device index."""
 
-    def __init__(self, device_id: int):
+    def __init__(self, device_id: int = 0):
         self.device_id = device_id
+        if device_id == 0:
+            self.camera_id = "CAM-01"
+            self.zone_name = "Zone 01 // Main Turnstile North"
+        elif device_id == 1:
+            self.camera_id = "CAM-02"
+            self.zone_name = "Zone 01 // Optical Turnstile B"
+        else:
+            self.camera_id = f"CAM-{device_id:02d}"
+            self.zone_name = f"Zone {device_id:02d} // DirectShow Device"
+
         self.running = False
         self.cap = None
         self.current_jpeg: bytes = generate_offline_frame(
@@ -197,11 +207,21 @@ class CameraDeviceWorker:
         self.frame_lock = threading.Lock()
         self.worker_thread = None
         self.is_live = False
-        self.tracker = SpatialTracker()
+        self.is_webcam = True
+        # For physical webcams (CAM-01 / laptop feed), completely disable background environmental fire/smoke heuristics
+        self.tracker = SpatialTracker(
+            camera_id=self.camera_id,
+            zone=self.zone_name,
+            is_webcam=True,
+            enable_fire_detection=False,
+        )
         self.last_crowd_alert_time = 0.0
         self.crowd_alert_cooldown = 15.0
         self.last_fall_alert_time = 0.0
         self.fall_alert_cooldown = 15.0
+        self.last_fire_alert_time = 0.0
+        self.fire_alert_cooldown = 15.0
+        self.current_fps = 0.0
 
     def _open_capture(self):
         try:
@@ -230,25 +250,41 @@ class CameraDeviceWorker:
         consecutive_errors = 0
         while self.running:
             if self.cap is None or not self.cap.isOpened():
+                alert_manager.pause_stream_dispatch(self.camera_id)
                 self.cap = self._open_capture()
                 if self.cap is None:
                     self.is_live = False
-                    fallback = generate_offline_frame(
-                        f"UATU // DEV-{self.device_id} OFFLINE",
-                        f"DEVICE INDEX {self.device_id} UNAVAILABLE",
+                    self.current_fps = 0.0
+                    # Stream Health Guard: skip AI inference, suppress alerts, and return offline signal frame
+                    offline_frame, _ = self.tracker.process_frame(None, ret=False)
+                    _, encoded = cv2.imencode(
+                        ".jpg", offline_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
                     )
                     with self.frame_lock:
-                        self.current_jpeg = fallback
+                        self.current_jpeg = encoded.tobytes()
                     time.sleep(1.0)
                     continue
 
             ret, frame = self.cap.read()
-            if ret and frame is not None:
+            if ret and frame is not None and frame.size > 0:
                 consecutive_errors = 0
                 self.is_live = True
+                alert_manager.resume_stream_dispatch(self.camera_id)
 
-                # Feature 1-4, 15-17 (ByteTrack, Tripwire, Occupancy HUD, Fall Detection)
-                annotated_frame, counts = self.tracker.process_frame(frame)
+                # Feature 1-4, 15-17 (ByteTrack, Tripwire, Occupancy HUD, Fall Detection) with Stream Health Guard
+                annotated_frame, counts = self.tracker.process_frame(frame, ret=ret)
+                self.current_fps = counts.get("fps", 30.0)
+
+                # Skip alert processing if stream health check failed
+                if not counts.get("stream_healthy", False):
+                    self.current_fps = 0.0
+                    _, encoded = cv2.imencode(
+                        ".jpg", annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
+                    )
+                    with self.frame_lock:
+                        self.current_jpeg = encoded.tobytes()
+                    time.sleep(0.033)
+                    continue
 
                 # Feature 15 WebSocket Alert Engine: dispatch when is_crowded with 15s cooldown
                 if counts.get("is_crowded"):
@@ -258,10 +294,11 @@ class CameraDeviceWorker:
                         alert_payload = {
                             "id": f"EVT-CROWD-{int(now_ts)}",
                             "time": datetime.now(IST).strftime("%H:%M:%S IST"),
-                            "zone": "Live Monitoring Zone",
+                            "zone": self.zone_name,
+                            "camera": self.camera_id,
                             "type": "ABNORMAL GATHERING",
                             "level": "CRITICAL",
-                            "detail": "Occupancy threshold breached (> 3 persons).",
+                            "detail": f"Occupancy threshold breached on {self.camera_id} ({self.zone_name}).",
                             "acknowledged": False,
                         }
                         logger.warning(
@@ -277,16 +314,44 @@ class CameraDeviceWorker:
                         fall_payload = {
                             "id": f"EVT-FALL-{int(now_ts)}",
                             "time": datetime.now(IST).strftime("%H:%M:%S IST"),
-                            "zone": "Live Monitoring Zone",
+                            "zone": self.zone_name,
+                            "camera": self.camera_id,
                             "type": "MAN DOWN / FALL DETECTED",
                             "level": "CRITICAL",
-                            "detail": "Worker fall detected based on skeletal pose geometry. Immediate assistance required.",
+                            "detail": f"Worker fall confirmed on {self.camera_id} ({self.zone_name}). Immediate assistance required.",
                             "acknowledged": False,
                         }
                         logger.warning(
                             f"WebSocket Fall Alert Fired from Device {self.device_id}: {fall_payload}"
                         )
                         alert_manager.broadcast_sync(fall_payload)
+
+                # Feature 21 Fire & Smoke Detection: webcams are strictly excluded to prevent false positives
+                if (counts.get("fire_detected") or counts.get("smoke_detected")) and not self.is_webcam:
+                    now_ts = time.time()
+                    cooldown_elapsed = (
+                        (now_ts - self.last_fire_alert_time) >= self.fire_alert_cooldown
+                        and (now_ts - self.tracker.last_fire_alert_time) >= self.fire_alert_cooldown
+                    )
+                    if cooldown_elapsed:
+                        self.last_fire_alert_time = now_ts
+                        self.tracker.last_fire_alert_time = now_ts
+                        fire_payload = {
+                            "id": f"EVT-HAZARD-{int(now_ts)}",
+                            "time": datetime.now(IST).strftime("%H:%M:%S IST"),
+                            "zone": self.zone_name,
+                            "camera": self.camera_id,
+                            "type": "CRITICAL HAZARD: FIRE / SMOKE DETECTED",
+                            "level": "CRITICAL",
+                            "detail": f"Hazard identified on {self.camera_id} ({self.zone_name}). Immediate evacuation required.",
+                            "acknowledged": False,
+                        }
+                        logger.warning(
+                            f"WebSocket Hazard Alert Fired from Device {self.device_id}: {fire_payload}"
+                        )
+                        alert_manager.broadcast_sync(fire_payload)
+                    else:
+                        self.last_fire_alert_time = max(self.last_fire_alert_time, self.tracker.last_fire_alert_time)
 
                 _, encoded = cv2.imencode(
                     ".jpg", annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
@@ -296,6 +361,8 @@ class CameraDeviceWorker:
                     self.current_jpeg = jpeg_bytes
                 time.sleep(0.033)  # ~30 FPS
             else:
+                alert_manager.pause_stream_dispatch(self.camera_id)
+                self.current_fps = 0.0
                 consecutive_errors += 1
                 if consecutive_errors > 8:
                     logger.warning(
@@ -305,12 +372,13 @@ class CameraDeviceWorker:
                         self.cap.release()
                         self.cap = None
                     self.is_live = False
-                fallback = generate_offline_frame(
-                    f"UATU // DEV-{self.device_id} OFFLINE",
-                    "FRAME ACQUISITION DROPPED",
+                # Stream Health Guard: offline/dropped frame -> purge alerts & yield clean signal
+                offline_frame, _ = self.tracker.process_frame(None, ret=False)
+                _, encoded = cv2.imencode(
+                    ".jpg", offline_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
                 )
                 with self.frame_lock:
-                    self.current_jpeg = fallback
+                    self.current_jpeg = encoded.tobytes()
                 time.sleep(0.1)
 
     def start(self):
@@ -368,7 +436,7 @@ multi_webcam_manager = MultiWebcamManager()
 # Backwards compatibility alias
 class WebcamManager:
     def get_latest_jpeg(self):
-        return multi_webcam_manager.get_worker(1).get_latest_jpeg()
+        return multi_webcam_manager.get_worker(0).get_latest_jpeg()
 
     def stop(self):
         multi_webcam_manager.stop_all()
@@ -395,11 +463,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Register running event loop for thread-safe alert broadcasts
     alert_manager.set_event_loop(asyncio.get_running_loop())
 
-    # Warm up device 1 (laptop webcam) on startup
-    multi_webcam_manager.get_worker(1)
+    # Warm up device 0 (laptop physical webcam) on startup
+    multi_webcam_manager.get_worker(0)
     yield
     logger.info(f"Shutting down {settings.PROJECT_NAME}")
     multi_webcam_manager.stop_all()
+    multi_file_stream_manager.stop_all()
 
 
 app = FastAPI(
@@ -522,84 +591,284 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 # =============================================================================
 
 
-async def generate_file_stream(file_path: Path, overlay_label: str = "FEED"):
-    """Streams a video file on a continuous loop with clean resource teardown."""
-    cap = None
-    try:
-        if not file_path.exists():
-            offline_bytes = generate_offline_frame(
-                "UATU // TEST VIDEO NOT FOUND", f"MISSING {file_path.name}"
-            )
-            while True:
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" + offline_bytes + b"\r\n"
+class FileStreamWorker:
+    """Thread-safe background reader for video files with dedicated frame buffer for smooth 25-30 FPS playback."""
+
+    def __init__(
+        self,
+        file_path: Path,
+        overlay_label: str = "FEED",
+        camera_id: str = "CAM-03",
+        zone: str = "Zone 03 // Logistics Yard North",
+    ):
+        self.file_path = file_path
+        self.overlay_label = overlay_label
+        self.camera_id = camera_id
+        self.zone = zone
+        self.running = False
+        self.current_jpeg: bytes = generate_offline_frame(
+            f"UATU // {self.camera_id} INITIALIZING", "BUFFERING VIDEO FRAMES..."
+        )
+        self.frame_lock = threading.Lock()
+        self.worker_thread: Optional[threading.Thread] = None
+        self.fps = 25.0
+        self.tracker = SpatialTracker(
+            camera_id=camera_id,
+            zone=zone,
+            is_webcam=False,
+            enable_fire_detection=True,
+        )
+        self.last_fall_alert_time = 0.0
+        self.fall_alert_cooldown = 15.0
+        self.last_fire_alert_time = 0.0
+        self.fire_alert_cooldown = 15.0
+        self.current_fps = 0.0
+        self.active_clients = 0
+
+    def add_client(self):
+        with self.frame_lock:
+            self.active_clients += 1
+
+    def remove_client(self):
+        with self.frame_lock:
+            self.active_clients = max(0, self.active_clients - 1)
+
+    def _run(self):
+        while self.running:
+            if not self.file_path.exists():
+                # Stream Health Guard: Missing file -> skip AI inference, suppress alerts, return clean offline frame
+                self.current_fps = 0.0
+                alert_manager.pause_stream_dispatch(self.camera_id)
+                offline_frame, _ = self.tracker.process_frame(None, ret=False)
+                _, encoded = cv2.imencode(
+                    ".jpg", offline_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
                 )
-                await asyncio.sleep(0.5)
+                with self.frame_lock:
+                    self.current_jpeg = encoded.tobytes()
+                time.sleep(1.0)
+                continue
 
-        cap = cv2.VideoCapture(str(file_path))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        delay = 1.0 / fps if fps and fps > 0 else 0.04
-        tracker = SpatialTracker()
-        last_fall_alert_time = 0.0
-        fall_alert_cooldown = 15.0
+            cap = cv2.VideoCapture(str(self.file_path))
+            raw_fps = cap.get(cv2.CAP_PROP_FPS)
+            self.fps = raw_fps if raw_fps and 5.0 <= raw_fps <= 60.0 else 25.0
+            frame_delay = 1.0 / self.fps
 
-        while True:
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                # Loop video to beginning
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ret, frame = cap.read()
-                if not ret or frame is None:
-                    offline_bytes = generate_offline_frame(
-                        "UATU // STREAM DELAY", "WAITING FOR FRAMES"
-                    )
-                    yield (
-                        b"--frame\r\n"
-                        b"Content-Type: image/jpeg\r\n\r\n" + offline_bytes + b"\r\n"
-                    )
-                    await asyncio.sleep(0.5)
-                    continue
-
-            # 1. Run AI Inference (YOLO11 ByteTrack & Tripwire & Fall Detection)
-            counts = {"persons": 0, "vehicles": 0, "entry": 0, "exit": 0, "fall_detected": False, "fire_detected": False}
             try:
-                frame, counts = tracker.process_frame(frame)
-            except Exception:
-                pass  # Fail silently and keep streaming if AI throws an error
+                while self.running:
+                    t_start = time.perf_counter()
+                    ret, frame = cap.read()
+                    if not ret or frame is None or frame.size == 0:
+                        # Seamless continuous loop
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        ret, frame = cap.read()
+                        if not ret or frame is None or frame.size == 0:
+                            # Stream Health Guard: End/Failure -> suppress alerts & return clean offline signal
+                            self.current_fps = 0.0
+                            alert_manager.pause_stream_dispatch(self.camera_id)
+                            offline_frame, _ = self.tracker.process_frame(None, ret=False)
+                            _, encoded = cv2.imencode(
+                                ".jpg", offline_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
+                            )
+                            with self.frame_lock:
+                                self.current_jpeg = encoded.tobytes()
+                            time.sleep(0.1)
+                            continue
 
-            # Feature 17 Fall Detection: check fall_detected with 15s cooldown
-            if counts.get("fall_detected"):
-                now_ts = time.time()
-                if (now_ts - last_fall_alert_time) >= fall_alert_cooldown:
-                    last_fall_alert_time = now_ts
-                    fall_payload = {
-                        "id": f"EVT-FALL-{int(now_ts)}",
-                        "time": datetime.now(IST).strftime("%H:%M:%S IST"),
-                        "zone": "Live Monitoring Zone",
-                        "type": "MAN DOWN / FALL DETECTED",
-                        "level": "CRITICAL",
-                        "detail": "Worker fall detected based on skeletal pose geometry. Immediate assistance required.",
-                        "acknowledged": False,
+                    # Stream is valid and active: resume alert dispatch permissions
+                    alert_manager.resume_stream_dispatch(self.camera_id)
+
+                    # Run AI Inference (ByteTrack, Tripwire, Fall Detection & Fire Detection) with Stream Health Guard
+                    counts = {
+                        "persons": 0,
+                        "vehicles": 0,
+                        "entry": 0,
+                        "exit": 0,
+                        "fall_detected": False,
+                        "fire_detected": False,
+                        "smoke_detected": False,
+                        "stream_healthy": True,
+                        "fps": 0,
                     }
-                    logger.warning(
-                        f"WebSocket Fall Alert Fired from File Stream: {fall_payload}"
-                    )
-                    alert_manager.broadcast_sync(fall_payload)
+                    try:
+                        frame, counts = self.tracker.process_frame(frame, ret=ret)
+                    except Exception as e:
+                        logger.debug(f"AI inference error in worker: {e}")
 
-            # 2. Encode clean annotated frame directly
-            _, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+                    self.current_fps = counts.get("fps", self.fps)
+
+                    # If stream health check returned unhealthy, skip alert dispatch
+                    if not counts.get("stream_healthy", False):
+                        self.current_fps = 0.0
+                        _, encoded = cv2.imencode(
+                            ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
+                        )
+                        with self.frame_lock:
+                            self.current_jpeg = encoded.tobytes()
+                        time.sleep(0.05)
+                        continue
+
+                    # Fall Detection Alert with 15s cooldown
+                    if counts.get("fall_detected"):
+                        now_ts = time.time()
+                        if (now_ts - self.last_fall_alert_time) >= self.fall_alert_cooldown:
+                            self.last_fall_alert_time = now_ts
+                            fall_payload = {
+                                "id": f"EVT-FALL-{int(now_ts)}",
+                                "time": datetime.now(IST).strftime("%H:%M:%S IST"),
+                                "zone": self.zone,
+                                "camera": self.camera_id,
+                                "type": "MAN DOWN / FALL DETECTED",
+                                "level": "CRITICAL",
+                                "detail": f"Worker fall confirmed on {self.camera_id} ({self.zone}). Immediate assistance required.",
+                                "acknowledged": False,
+                            }
+                            logger.warning(
+                                f"WebSocket Fall Alert Fired from File Stream [{self.camera_id}]: {fall_payload}"
+                            )
+                            alert_manager.broadcast_sync(fall_payload)
+
+                    # Fire & Smoke Detection Alert with 15s cooldown
+                    if counts.get("fire_detected") or counts.get("smoke_detected"):
+                        now_ts = time.time()
+                        cooldown_elapsed = (
+                            (now_ts - self.last_fire_alert_time) >= self.fire_alert_cooldown
+                            and (now_ts - self.tracker.last_fire_alert_time) >= self.fire_alert_cooldown
+                        )
+                        if cooldown_elapsed:
+                            self.last_fire_alert_time = now_ts
+                            self.tracker.last_fire_alert_time = now_ts
+                            fire_payload = {
+                                "id": f"EVT-HAZARD-{int(now_ts)}",
+                                "time": datetime.now(IST).strftime("%H:%M:%S IST"),
+                                "zone": self.zone,
+                                "camera": self.camera_id,
+                                "type": "CRITICAL HAZARD: FIRE / SMOKE DETECTED",
+                                "level": "CRITICAL",
+                                "detail": f"Hazard identified on {self.camera_id} ({self.zone}). Immediate evacuation required.",
+                                "acknowledged": False,
+                            }
+                            logger.warning(
+                                f"WebSocket Hazard Alert Fired from File Stream [{self.camera_id}]: {fire_payload}"
+                            )
+                            alert_manager.broadcast_sync(fire_payload)
+                        else:
+                            self.last_fire_alert_time = max(self.last_fire_alert_time, self.tracker.last_fire_alert_time)
+
+                    # Encode clean annotated frame directly
+                    _, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+                    jpeg_bytes = encoded.tobytes()
+
+                    with self.frame_lock:
+                        self.current_jpeg = jpeg_bytes
+
+                    elapsed = time.perf_counter() - t_start
+                    sleep_time = max(0.001, frame_delay - elapsed)
+                    time.sleep(sleep_time)
+            finally:
+                cap.release()
+
+    def start(self):
+        if not self.running:
+            self.running = True
+            self.worker_thread = threading.Thread(
+                target=self._run,
+                daemon=True,
+                name=f"UATU-FileWorker-{self.camera_id}",
+            )
+            self.worker_thread.start()
+
+    def get_latest_jpeg(self) -> bytes:
+        with self.frame_lock:
+            return self.current_jpeg
+
+    def stop(self):
+        self.running = False
+        alert_manager.pause_stream_dispatch(self.camera_id)
+
+
+class MultiFileStreamManager:
+    """Thread-safe manager coordinating concurrent video file stream workers."""
+
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super(MultiFileStreamManager, cls).__new__(cls)
+                cls._instance._workers = {}
+                cls._instance._worker_lock = threading.Lock()
+            return cls._instance
+
+    def get_worker(
+        self,
+        file_path: Path,
+        overlay_label: str = "FEED",
+        camera_id: str = "CAM-03",
+        zone: str = "Zone 03 // Logistics Yard North",
+    ) -> FileStreamWorker:
+        key = f"{camera_id}:{file_path.resolve()}"
+        with self._worker_lock:
+            # Circuit Breaker: Stop any prior worker running for the same camera_id with a different file
+            for k, w in list(self._workers.items()):
+                if w.camera_id == camera_id and k != key:
+                    logger.info(f"Circuit Breaker: Stopping previous worker for {camera_id}: {w.file_path}")
+                    w.stop()
+                    del self._workers[k]
+
+            if key not in self._workers or not self._workers[key].running:
+                worker = FileStreamWorker(file_path, overlay_label, camera_id, zone)
+                worker.start()
+                self._workers[key] = worker
+            return self._workers[key]
+
+    def stop_camera(self, camera_id: str):
+        """Stops all active file stream workers associated with the specified camera ID."""
+        with self._worker_lock:
+            for k, w in list(self._workers.items()):
+                if w.camera_id == camera_id:
+                    logger.info(f"Circuit Breaker: Stopping worker for {camera_id}")
+                    w.stop()
+                    del self._workers[k]
+            alert_manager.pause_stream_dispatch(camera_id)
+
+    def stop_all(self):
+        with self._worker_lock:
+            for _, worker in self._workers.items():
+                worker.stop()
+            self._workers.clear()
+
+
+multi_file_stream_manager = MultiFileStreamManager()
+
+
+async def generate_file_stream(
+    file_path: Path,
+    overlay_label: str = "FEED",
+    camera_id: str = "CAM-03",
+    zone: str = "Zone 03 // Logistics Yard North",
+):
+    """Streams from a threaded video file reader buffer at full frame rate without blocking."""
+    worker = multi_file_stream_manager.get_worker(
+        file_path=file_path,
+        overlay_label=overlay_label,
+        camera_id=camera_id,
+        zone=zone,
+    )
+    worker.add_client()
+    frame_interval = 1.0 / max(10.0, worker.fps)
+    try:
+        while True:
+            frame_bytes = worker.get_latest_jpeg()
             yield (
                 b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + encoded.tobytes() + b"\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
             )
-            await asyncio.sleep(delay)
+            await asyncio.sleep(frame_interval)
     except (asyncio.CancelledError, GeneratorExit):
         pass
     finally:
-        if cap is not None:
-            cap.release()
-            logger.info(f"Released video file resources for {file_path.name}")
+        worker.remove_client()
 
 
 async def generate_parameterized_webcam_stream(device_id: int):
@@ -619,10 +888,15 @@ async def generate_parameterized_webcam_stream(device_id: int):
 
 @app.get("/api/video-stream")
 def get_video_stream():
-    """Camera 2 / Loop stream: loops test_video.mp4 continuously."""
+    """Camera 3 / Loop stream: loops test_video.mp4 continuously."""
     video_path = get_test_video_path()
     return StreamingResponse(
-        generate_file_stream(video_path, overlay_label="UATU CAM-02 [TEST LOOP]"),
+        generate_file_stream(
+            video_path,
+            overlay_label="UATU CAM-03 [TEST LOOP]",
+            camera_id="CAM-03",
+            zone="Zone 03 // Logistics Yard North",
+        ),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
 
@@ -637,12 +911,59 @@ def get_webcam_stream_by_device(device_id: int):
 
 
 @app.get("/api/webcam-stream")
-def get_webcam_stream(device_id: int = 1):
-    """Default webcam stream (defaults to device_id=1 to prioritize physical laptop camera)."""
+def get_webcam_stream(device_id: int = 0):
+    """Default webcam stream (defaults to device_id=0 to prioritize physical laptop camera)."""
     return StreamingResponse(
         generate_parameterized_webcam_stream(device_id),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
+
+
+@app.get("/api/camera-telemetry")
+def get_camera_telemetry():
+    """
+    Returns real-time processing FPS, health status, and metadata for all cameras.
+    Guarantees 0 FPS for offline or unassigned streams, and real-time FPS for active streams.
+    """
+    telemetry = {
+        f"CAM-0{i}": {
+            "camera_id": f"CAM-0{i}",
+            "is_online": False,
+            "fps": 0,
+            "status": "STREAM OFFLINE",
+        }
+        for i in range(1, 10)
+    }
+
+    # 1. Device workers (Webcams / hardware devices)
+    with multi_webcam_manager._worker_lock:
+        for dev_id, worker in multi_webcam_manager._workers.items():
+            cam_id = f"CAM-0{dev_id + 1}"
+            is_active = worker.is_live and alert_manager.is_stream_active(cam_id)
+            fps = float(getattr(worker, "current_fps", 0.0)) if is_active else 0.0
+            telemetry[cam_id] = {
+                "camera_id": cam_id,
+                "is_online": is_active,
+                "fps": round(fps, 1) if is_active else 0,
+                "status": "LIVE" if is_active else "STREAM OFFLINE",
+                "device_id": dev_id,
+            }
+
+    # 2. File stream workers (Custom uploads / video loops)
+    with multi_file_stream_manager._worker_lock:
+        for key, worker in multi_file_stream_manager._workers.items():
+            cam_id = worker.camera_id
+            is_active = worker.running and alert_manager.is_stream_active(cam_id)
+            fps = float(getattr(worker, "current_fps", 0.0)) if is_active else 0.0
+            telemetry[cam_id] = {
+                "camera_id": cam_id,
+                "is_online": is_active,
+                "fps": round(fps, 1) if is_active else 0,
+                "status": "LIVE" if is_active else "STREAM OFFLINE",
+                "zone": worker.zone,
+            }
+
+    return telemetry
 
 
 @app.post("/api/upload-video")
@@ -683,7 +1004,11 @@ async def upload_video(file: UploadFile = File(...)):
 
 
 @app.get("/api/custom-stream/{video_id}")
-def get_custom_stream(video_id: str):
+def get_custom_stream(
+    video_id: str,
+    camera: Optional[str] = None,
+    zone: Optional[str] = None,
+):
     """Streams an uploaded custom video file matching the video_id."""
     matched_files = list(UPLOADS_DIR.glob(f"{video_id}_*"))
     if not matched_files:
@@ -693,16 +1018,46 @@ def get_custom_stream(video_id: str):
         )
 
     target_video = matched_files[0]
+
+    cam_to_zone = {
+        "CAM-01": "Zone 01 // Main Turnstile North",
+        "CAM-02": "Zone 01 // Optical Turnstile B",
+        "CAM-03": "Zone 03 // Logistics Yard North",
+        "CAM-04": "Zone 02 // Precision Machining Line",
+        "CAM-05": "Zone 04 // Tier-3 Data Center Vault",
+        "CAM-06": "Zone 06 // Western Security Barrier",
+        "CAM-07": "Zone 05 // Cleanroom Corridor",
+        "CAM-08": "Zone 07 // Executive Wing",
+        "CAM-09": "Zone 08 // South Perimeter Gate",
+    }
+
+    if not camera:
+        fname = target_video.name.lower()
+        if "momentfatal" in fname or "batteryplant" in fname:
+            camera = "CAM-05"
+            zone = "Zone 04 // Tier-3 Data Center Vault"
+        elif "cctvpeople" in fname or "aluminumfactory" in fname or "holysmokes" in fname:
+            camera = "CAM-06"
+            zone = "Zone 06 // Western Security Barrier"
+        else:
+            camera = "CAM-04"
+            zone = "Zone 02 // Precision Machining Line"
+    elif not zone:
+        zone = cam_to_zone.get(camera, "Zone 04 // Tier-3 Data Center Vault")
+
     return StreamingResponse(
         generate_file_stream(
-            target_video, overlay_label=f"UATU CUSTOM STREAM [{video_id}]"
+            target_video,
+            overlay_label=f"UATU CUSTOM STREAM [{camera}]",
+            camera_id=camera,
+            zone=zone,
         ),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
 
 
 class EnrollRequest(BaseModel):
-    device_id: int = Field(default=1, description="Camera device index (e.g. 0 for Iriun Mobile, 1 for Laptop Webcam)")
+    device_id: int = Field(default=0, description="Camera device index (e.g. 0 for Laptop Webcam, 1 for Mobile/Iriun Webcam)")
     employee_id: str = Field(..., description="Unique employee badge identifier (e.g. EMP-1001)")
     name: str = Field(..., description="Full personnel name")
     roll: str = Field(..., description="Roll number or departmental ID")
@@ -834,7 +1189,7 @@ def get_enrolled_users():
 
 
 class VerifyAccessRequest(BaseModel):
-    device_id: int = Field(default=1, description="Camera device index to look through (e.g. 0 for Iriun, 1 for Laptop)")
+    device_id: int = Field(default=0, description="Camera device index to look through (e.g. 0 for Laptop Webcam, 1 for Mobile/Iriun Webcam)")
     employee_id: str = Field(..., description="Scanned badge employee ID (e.g. EMP-1001)")
 
 

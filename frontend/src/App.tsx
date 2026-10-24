@@ -63,6 +63,7 @@ interface IncidentAlert {
   id: string;
   timestamp: string;
   zone: string;
+  camera?: string;
   type: string;
   severity: AlertSeverity;
   detail: string;
@@ -102,19 +103,19 @@ const INITIAL_CAMERAS: CameraChannel[] = [
     name: 'Laptop Live Webcam (Physical)',
     zone: 'Zone 01 // Main Turnstile North',
     sourceType: 'WEBCAM',
-    deviceId: 1,
-    streamUrl: 'http://127.0.0.1:8000/api/webcam-stream/1',
+    deviceId: 0,
+    streamUrl: 'http://127.0.0.1:8000/api/webcam-stream/0',
     isOnline: true,
     fps: 30,
     resolution: '640x480',
   },
   {
     id: 'CAM-02',
-    name: 'Mobile Webcam (Iriun / Device 0)',
+    name: 'Mobile Webcam (Iriun / Device 1)',
     zone: 'Zone 01 // Optical Turnstile B',
     sourceType: 'WEBCAM',
-    deviceId: 0,
-    streamUrl: 'http://127.0.0.1:8000/api/webcam-stream/0',
+    deviceId: 1,
+    streamUrl: 'http://127.0.0.1:8000/api/webcam-stream/1',
     isOnline: true,
     fps: 30,
     resolution: '640x480',
@@ -125,8 +126,8 @@ const INITIAL_CAMERAS: CameraChannel[] = [
     zone: 'Zone 03 // Logistics Yard North',
     sourceType: 'BACKEND_LOOP',
     streamUrl: 'http://127.0.0.1:8000/api/video-stream',
-    isOnline: true,
-    fps: 20,
+    isOnline: false,
+    fps: 0,
     resolution: '1080p',
   },
   {
@@ -262,14 +263,14 @@ export const App: React.FC = () => {
   // 9-Camera System State
   const [cameras, setCameras] = useState<CameraChannel[]>(INITIAL_CAMERAS);
   const [selectedCamForConfig, setSelectedCamForConfig] = useState<CameraChannel | null>(null);
-  const [modalDeviceId, setModalDeviceId] = useState<number>(1);
+  const [modalDeviceId, setModalDeviceId] = useState<number>(0);
   const [uploadLoading, setUploadLoading] = useState<boolean>(false);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const openConfigModal = (cam: CameraChannel) => {
     setSelectedCamForConfig(cam);
-    setModalDeviceId(cam.deviceId ?? 1);
+    setModalDeviceId(cam.deviceId ?? 0);
   };
 
   // Auto-recovery / reconnect tracking per camera
@@ -283,7 +284,7 @@ export const App: React.FC = () => {
 
   // Live Biometric Personnel Enrollment Modal State
   const [showEnrollModal, setShowEnrollModal] = useState<boolean>(false);
-  const [enrollDeviceId, setEnrollDeviceId] = useState<number>(1);
+  const [enrollDeviceId, setEnrollDeviceId] = useState<number>(0);
   const [enrollName, setEnrollName] = useState<string>('');
   const [enrollRoll, setEnrollRoll] = useState<string>('');
   const [enrollId, setEnrollId] = useState<string>('');
@@ -295,7 +296,7 @@ export const App: React.FC = () => {
 
   // Live Biometric Verification State
   const [verifyEmployeeId, setVerifyEmployeeId] = useState<string>('EMP-1001');
-  const [verifyDeviceId, setVerifyDeviceId] = useState<number>(1);
+  const [verifyDeviceId, setVerifyDeviceId] = useState<number>(0);
   const [isVerifying, setIsVerifying] = useState<boolean>(false);
   const [verifyFeedback, setVerifyFeedback] = useState<{
     type: 'success' | 'warning' | 'error';
@@ -360,6 +361,7 @@ export const App: React.FC = () => {
               const incomingAlert: IncidentAlert = {
                 id: data.id || `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
                 timestamp: data.time || data.timestamp || formatUtcTime(),
+                camera: data.camera,
                 zone: data.zone || 'Live Monitoring Zone',
                 type: data.type,
                 severity: (data.level || data.severity || 'CRITICAL') as AlertSeverity,
@@ -502,6 +504,45 @@ export const App: React.FC = () => {
   }, [probeInfrastructure]);
 
   /* -----------------------------------------------------------------------
+     4b. Real-Time Camera Telemetry Sync (/api/camera-telemetry)
+     ----------------------------------------------------------------------- */
+  useEffect(() => {
+    let isDisposed = false;
+    const fetchTelemetry = async () => {
+      try {
+        const res = await fetch('http://127.0.0.1:8000/api/camera-telemetry');
+        if (res.ok) {
+          const data = await res.json();
+          if (!isDisposed && data) {
+            setCameras((prev) =>
+              prev.map((c) => {
+                const info = data[c.id];
+                if (info) {
+                  return {
+                    ...c,
+                    fps: info.is_online ? info.fps : 0,
+                    isOnline: c.sourceType === 'STANDBY' ? false : (info.is_online ?? c.isOnline),
+                  };
+                }
+                return c;
+              })
+            );
+          }
+        }
+      } catch {
+        // Silently tolerate during dev server reloads
+      }
+    };
+
+    const interval = setInterval(fetchTelemetry, 2500);
+    fetchTelemetry();
+    return () => {
+      isDisposed = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  /* -----------------------------------------------------------------------
      5. Source Assignment & Video Upload Logic
      ----------------------------------------------------------------------- */
   const handleAssignSource = (
@@ -526,6 +567,7 @@ export const App: React.FC = () => {
             customFileName: customFileName ?? c.customFileName,
             deviceId: sourceType === 'WEBCAM' ? (deviceId ?? 1) : undefined,
             isOnline: isNowOnline,
+            fps: isNowOnline ? (sourceType === 'WEBCAM' ? 30 : 25) : 0,
           };
         }
         return c;
@@ -554,7 +596,9 @@ export const App: React.FC = () => {
       }
 
       const data = await response.json();
-      const streamUrl = `http://127.0.0.1:8000${data.stream_url}`;
+      const streamUrl = `http://127.0.0.1:8000${data.stream_url}?camera=${encodeURIComponent(
+        selectedCamForConfig.id
+      )}&zone=${encodeURIComponent(selectedCamForConfig.zone)}`;
 
       handleAssignSource(
         selectedCamForConfig.id,
@@ -1136,7 +1180,7 @@ export const App: React.FC = () => {
                                 {cam.zone}
                               </span>
                               <span className="bg-slate-950/80 backdrop-blur px-1.5 py-0.5 rounded text-emerald-400 border border-slate-800">
-                                {cam.fps} FPS
+                                {(!cam.isOnline || isError || !hasStream || cam.sourceType === 'STANDBY') ? 0 : (cam.fps || 25)} FPS
                               </span>
                             </div>
                           </div>
@@ -1499,7 +1543,7 @@ export const App: React.FC = () => {
                       {/* Zone Identifier */}
                       <div className="text-[11px] font-mono text-emerald-400/90 mb-1 flex items-center gap-1.5">
                         <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                        <span>{alert.zone}</span>
+                        <span>{alert.camera ? `${alert.camera} • ${alert.zone}` : alert.zone}</span>
                       </div>
 
                       {/* Alert Type Heading */}

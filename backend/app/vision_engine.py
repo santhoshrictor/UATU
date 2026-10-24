@@ -5,9 +5,11 @@ import uuid
 import logging
 from datetime import datetime, timezone, timedelta
 import numpy as np
+from typing import Optional, List, Dict, Any, Tuple
 from ultralytics import YOLO
 
 from backend.app.core.websocket_manager import alert_manager
+from backend.app.fire_detector import FireDetector, COLOR_FIRE
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -37,8 +39,18 @@ class SpatialTracker:
         zone_threshold=4,
         alert_cooldown=15.0,
         fall_confirmation_threshold=5,
+        fire_model=None,
+        camera_id: str = "CAM-01",
+        zone: str = "Live Monitoring Zone",
+        is_webcam: bool = False,
+        enable_fire_detection: Optional[bool] = None,
         **kwargs,
     ):
+        self.camera_id = camera_id
+        self.zone_name = zone
+        self.zone = zone  # Compatibility alias
+        self.is_webcam = is_webcam
+
         if model is not None:
             self.model = model
         else:
@@ -83,11 +95,109 @@ class SpatialTracker:
         self.track_heights = {}
         self.track_center_y = {}
 
-    def detect_fire_and_smoke(self, frame: np.ndarray):
-        """Disabled: Fire detection module removed to eliminate false positives."""
-        return False, []
+        # Feature 21: Machine Learning Fire & Smoke Detection
+        # Exclude physical webcams (CAM-01 / laptop feed) from environmental smoke/fire heuristics
+        if enable_fire_detection is None:
+            self.enable_fire_detection = not is_webcam
+        else:
+            self.enable_fire_detection = enable_fire_detection
 
-    def process_frame(self, frame):
+        if not self.enable_fire_detection:
+            self.fire_detector = None
+        else:
+            self.fire_detector = FireDetector(
+                model=fire_model or kwargs.get("fire_detector"),
+                fire_conf_threshold=0.50,
+                smoke_conf_threshold=0.45,
+                temporal_buffer_frames=5,
+                is_webcam=is_webcam,
+            )
+        self.last_fire_alert_time = 0.0
+        self.fire_alert_cooldown = alert_cooldown
+        self.is_stream_active = False
+
+        # Real-time frame processing FPS telemetry
+        self.fps_last_time = time.time()
+        self.fps_frame_count = 0
+        self.current_fps = 0.0
+
+    def generate_offline_signal_frame(
+        self,
+        width: int = 640,
+        height: int = 480,
+        message: str = "STREAM OFFLINE / NO SIGNAL",
+    ) -> np.ndarray:
+        """
+        Generates a clean blank/black frame with an overlay reading STREAM OFFLINE / NO SIGNAL.
+        Used by the Stream Health Guard when a camera feed is offline, unassigned, or fails to read.
+        """
+        w = max(320, width)
+        h = max(240, height)
+        offline_frame = np.zeros((h, w, 3), dtype=np.uint8)
+
+        # Subtle industrial border reticle
+        cv2.rectangle(offline_frame, (10, 10), (w - 10, h - 10), (30, 41, 59), 1)
+
+        # Center banner
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.65 if w >= 500 else 0.5
+        thickness = 2
+        (tw, th), _ = cv2.getTextSize(message, font, font_scale, thickness)
+        text_x = max(16, (w - tw) // 2)
+        text_y = h // 2
+
+        # Red status indicator dot
+        dot_x = max(16, text_x - 18)
+        cv2.circle(offline_frame, (dot_x, text_y - 6), 6, (68, 68, 239), -1)
+
+        # Main alert text: STREAM OFFLINE / NO SIGNAL
+        cv2.putText(
+            offline_frame,
+            message,
+            (text_x, text_y),
+            font,
+            font_scale,
+            (255, 255, 255),
+            thickness,
+            cv2.LINE_AA,
+        )
+
+        # Camera ID & Zone sub-label
+        subtext = f"{self.camera_id} // {self.zone_name}"
+        (stw, sth), _ = cv2.getTextSize(subtext, font, 0.45, 1)
+        stext_x = max(16, (w - stw) // 2)
+        cv2.putText(
+            offline_frame,
+            subtext,
+            (stext_x, text_y + 28),
+            font,
+            0.45,
+            (148, 163, 184),
+            1,
+            cv2.LINE_AA,
+        )
+
+        return offline_frame
+
+    def detect_fire_and_smoke(self, frame: np.ndarray):
+        """Runs ML fire and smoke detection on the provided frame."""
+        if self.fire_detector is None or frame is None:
+            return False, []
+        _, detected, detections = self.fire_detector.detect(frame)
+        return detected, detections
+
+    def process_frame(
+        self,
+        frame: Optional[np.ndarray],
+        ret: bool = True,
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        # Allow positional parameter flexibility if passed as (ret, frame)
+        if isinstance(frame, bool):
+            ret_arg = frame
+            frame_arg = ret if (isinstance(ret, np.ndarray) or ret is None) else None
+            ret = ret_arg
+            frame = frame_arg
+
         persons_count = 0
         vehicles_count = 0
         occupancy_count = 0
@@ -95,8 +205,47 @@ class SpatialTracker:
         fire_detected = False
         is_crowded = False
 
-        if frame is None or not isinstance(frame, np.ndarray):
-            return frame, {
+        # Stream Health Guard:
+        # Check if the frame is valid (ret is True and frame is not empty/None).
+        # If a camera feed is offline, unassigned, or fails to read:
+        # 1. Immediately skip all AI inference (pose, fire, smoke).
+        # 2. Suppress all alert generation for that camera ID.
+        # 3. Return a clean blank/black frame with an overlay reading STREAM OFFLINE / NO SIGNAL.
+        is_valid_stream = (
+            bool(ret)
+            and (frame is not None)
+            and isinstance(frame, np.ndarray)
+            and (frame.size > 0)
+        )
+        if is_valid_stream and hasattr(frame, "shape") and len(frame.shape) >= 2:
+            if frame.shape[0] == 0 or frame.shape[1] == 0:
+                is_valid_stream = False
+
+        if not is_valid_stream:
+            self.is_stream_active = False
+            self.current_fps = 0.0
+            self.fps_frame_count = 0
+            self.fps_last_time = time.time()
+            alert_manager.pause_stream_dispatch(self.camera_id)
+
+            # Suppress all alerts & purge lingering temporal buffers so no ghost alerts fire
+            self.fall_counters.clear()
+            self.fall_consecutive_frames.clear()
+            self.untracked_fall_counter = 0
+            self.untracked_fall_consecutive = 0
+            self.track_heights.clear()
+            self.track_center_y.clear()
+            self.track_history.clear()
+            self.previous_y.clear()
+            if self.fire_detector is not None:
+                self.fire_detector.reset()
+
+            # Determine dimensions from incoming frame if available, else standard 640x480
+            h = frame.shape[0] if (frame is not None and isinstance(frame, np.ndarray) and frame.ndim >= 2 and frame.shape[0] > 0) else 480
+            w = frame.shape[1] if (frame is not None and isinstance(frame, np.ndarray) and frame.ndim >= 2 and frame.shape[1] > 0) else 640
+            offline_frame = self.generate_offline_signal_frame(width=w, height=h)
+
+            return offline_frame, {
                 "entry": self.down_count,
                 "exit": self.up_count,
                 "persons": 0,
@@ -107,7 +256,30 @@ class SpatialTracker:
                 "gathering_alert": False,
                 "fall_detected": False,
                 "fire_detected": False,
+                "smoke_detected": False,
+                "hazard_type": None,
+                "stream_healthy": False,
+                "fps": 0,
             }
+
+        # Valid live frame: mark stream active on circuit breaker
+        self.is_stream_active = True
+        alert_manager.resume_stream_dispatch(self.camera_id)
+
+        # Calculate real-time frame processing FPS
+        self.fps_frame_count += 1
+        now_time = time.time()
+        elapsed_time = now_time - self.fps_last_time
+        if elapsed_time >= 1.0:
+            self.current_fps = round(self.fps_frame_count / elapsed_time, 1)
+            self.fps_frame_count = 0
+            self.fps_last_time = now_time
+        elif self.current_fps == 0.0 and elapsed_time > 0.0:
+            self.current_fps = round(self.fps_frame_count / elapsed_time, 1)
+
+        reported_fps = self.current_fps if self.current_fps > 0 else (
+            round(self.fps_frame_count / max(0.001, elapsed_time), 1)
+        )
 
         try:
             height, width = frame.shape[:2]
@@ -264,38 +436,12 @@ class SpatialTracker:
                             if cv2.pointPolygonTest(self.zone_pts, (float(feet_x), float(feet_y)), False) >= 0:
                                 occupancy_count += 1
 
-                            # Feature 17: Fall Detection (Temporal Frame Buffer & Refined Pose Math)
-                            # 1. Condition A (Overhead Prone):
-                            #    - Box width exceeds height (w > h * 1.1) continuously for 5 frames
-                            # 2. Condition B (Seated vs Collapse):
-                            #    - If a person is sitting, hip-to-shoulder vertical vector remains stable.
-                            #    - Only trigger if vertical height collapses by > 50% relative to standing average while shifting horizontal.
-                            # 3. Keypoint Confidence Filtering:
-                            #    - Verify keypoint confidence (kpt[i][conf] > 0.3) before factoring coordinates into the math
-                            # 4. Temporal Frame Buffer:
-                            #    - Must persist for at least 5 consecutive frames (~0.25s at 20fps) via self.fall_counters[track_id]
+                            # Feature 17: Fall Detection Guardrails
+                            # Guard 1 (Incomplete Body Guard): If bounding box touches bottom edge (desk webcam), disable fall detection entirely.
+                            # Guard 2 (Strict Trajectory Rule): Fall requires rapid downward center-y shift AND true horizontal orientation (w > h * 1.3).
                             is_falling = False
                             person_kpts = None
                             fall_condition_met = False
-
-                            is_overhead_prone = (w > h * 1.1)
-
-                            # Track baseline standing height for Condition B (Seated vs Collapse)
-                            if tid is not None:
-                                if tid not in self.track_heights:
-                                    self.track_heights[tid] = []
-                                if w <= h * 1.1:
-                                    self.track_heights[tid].append(h)
-                                    if len(self.track_heights[tid]) > 30:
-                                        self.track_heights[tid].pop(0)
-
-                                upright_history = self.track_heights.get(tid, [])
-                                baseline_standing_h = max(upright_history) if len(upright_history) > 0 else float(h)
-                                height_collapsed_over_50 = (baseline_standing_h > 0) and (h < baseline_standing_h * 0.5) and (w > h)
-                            else:
-                                height_collapsed_over_50 = (h < 90 and w > h)
-
-                            is_collapse = height_collapsed_over_50 or (h < 90 and w > h)
 
                             has_valid_pose = False
                             nose_y = 0.0
@@ -330,22 +476,62 @@ class SpatialTracker:
                                         hip_y = sum(valid_hips) / float(len(valid_hips))
                                         has_valid_pose = True
 
-                            if has_valid_pose:
-                                spine_v_dist = abs(shoulder_y - hip_y)
-                                compression_threshold = max(self.spine_compression_threshold, h * 0.35)
-                                spine_compressed = (spine_v_dist < compression_threshold)
-                                nose_at_or_below_hip = (nose_y >= hip_y)
-                                is_upright_sitting = (nose_y < hip_y and shoulder_y < hip_y)
+                            is_bottom_edge_cut = (y2 >= height - 15)
 
-                                # Condition B (Seated vs Collapse):
-                                # If sitting, hip-to-shoulder vertical vector remains stable (spine_compressed False, nose_y < hip_y).
-                                # Only trigger if height collapses by over 50% relative to standing average while shifting horizontal.
-                                if is_upright_sitting and not height_collapsed_over_50:
-                                    fall_condition_met = False
+                            if has_valid_pose and (nose_y < hip_y):
+                                # Upright pose (head above hips) - sitting or standing, never a fall
+                                fall_condition_met = False
+                                if tid is not None:
+                                    self.fall_counters[tid] = 0
+                                    self.fall_consecutive_frames[tid] = 0
                                 else:
-                                    fall_condition_met = is_overhead_prone or height_collapsed_over_50 or (spine_compressed and nose_at_or_below_hip)
+                                    self.untracked_fall_counter = 0
+                                    self.untracked_fall_consecutive = 0
+                            elif is_bottom_edge_cut:
+                                # Desk webcam guard: legs cut off at bottom of frame -> disable fall detection entirely
+                                fall_condition_met = False
+                                if tid is not None:
+                                    self.fall_counters[tid] = 0
+                                    self.fall_consecutive_frames[tid] = 0
+                                else:
+                                    self.untracked_fall_counter = 0
+                                    self.untracked_fall_consecutive = 0
                             else:
-                                fall_condition_met = is_overhead_prone or is_collapse
+                                # Strict Trajectory Rule & True Horizontal Orientation (w > h * 1.3)
+                                is_true_horizontal = (w > h * 1.3)
+                                rapid_downward_shift = False
+
+                                if tid is not None:
+                                    if tid not in self.track_center_y:
+                                        self.track_center_y[tid] = []
+                                    y_hist = self.track_center_y[tid]
+
+                                    if len(y_hist) >= 1:
+                                        earliest_y = min(y_hist)
+                                        if (center_y - earliest_y) >= 20:
+                                            rapid_downward_shift = True
+                                    elif len(y_hist) == 0:
+                                        # First observation: allow if pose has head at/below hips or collapse
+                                        if has_valid_pose and (nose_y >= hip_y):
+                                            rapid_downward_shift = True
+                                        elif not has_valid_pose and is_true_horizontal:
+                                            rapid_downward_shift = True
+
+                                    # Preserve active confirmed falling sequence while still horizontal
+                                    if self.fall_counters.get(tid, 0) >= 1 and is_true_horizontal:
+                                        rapid_downward_shift = True
+
+                                    y_hist.append(center_y)
+                                    if len(y_hist) > 20:
+                                        y_hist.pop(0)
+                                else:
+                                    if has_valid_pose:
+                                        rapid_downward_shift = (nose_y >= hip_y)
+                                    else:
+                                        rapid_downward_shift = is_true_horizontal
+
+                                # Trigger fall only when both true horizontal and rapid downward drop are present
+                                fall_condition_met = is_true_horizontal and rapid_downward_shift
 
                             # Temporal Frame Buffer: persist for at least 5 consecutive frames
                             if fall_condition_met:
@@ -523,37 +709,79 @@ class SpatialTracker:
             )
 
             # 5. Alert Trigger & 15s Cooldown WebSocket Dispatch (IST Timestamps)
-            if is_crowded:
+            # Circuit Breaker: strictly gate dispatches on verified active stream status
+            if is_crowded and self.is_stream_active:
                 now_ts = time.time()
                 if (now_ts - self.last_alert_time) >= self.alert_cooldown:
                     self.last_alert_time = now_ts
                     alert_payload = {
                         "id": f"EVT-CROWD-{int(now_ts)}",
                         "time": datetime.now(IST).strftime("%H:%M:%S IST"),
-                        "zone": "Live Monitoring Zone",
+                        "zone": self.zone_name,
+                        "camera": self.camera_id,
                         "type": "ABNORMAL GATHERING",
                         "level": "CRITICAL",
-                        "detail": "Occupancy threshold breached (> 3 persons).",
+                        "detail": f"Occupancy threshold breached on {self.camera_id} ({self.zone_name}).",
                         "acknowledged": False,
                     }
                     logger.warning(f"WebSocket Alert Fired: {alert_payload}")
                     alert_manager.broadcast_sync(alert_payload)
 
-            if fall_detected:
+            if fall_detected and self.is_stream_active:
                 now_ts = time.time()
                 if (now_ts - self.last_fall_alert_time) >= self.fall_alert_cooldown:
                     self.last_fall_alert_time = now_ts
                     fall_payload = {
                         "id": f"EVT-FALL-{int(now_ts)}",
                         "time": datetime.now(IST).strftime("%H:%M:%S IST"),
-                        "zone": "Live Monitoring Zone",
+                        "zone": self.zone_name,
+                        "camera": self.camera_id,
                         "type": "MAN DOWN / FALL DETECTED",
                         "level": "CRITICAL",
-                        "detail": "Worker fall confirmed: spine vector compression & head below hip level persisted across frames.",
+                        "detail": f"Worker fall confirmed on {self.camera_id} ({self.zone_name}). Immediate assistance required.",
                         "acknowledged": False,
                     }
                     logger.warning(f"WebSocket Fall Alert Fired: {fall_payload}")
                     alert_manager.broadcast_sync(fall_payload)
+
+            # Feature 21: Machine Learning Fire & Smoke Detection (Optimized for CAM-03 flames & CAM-04 smoke)
+            smoke_detected = False
+            hazard_type = None
+            if self.fire_detector is not None and not self.is_webcam and self.is_stream_active:
+                try:
+                    frame, hazard_detected, fire_boxes = self.fire_detector.detect(frame)
+                    if hazard_detected and self.is_stream_active:
+                        is_smoke = (
+                            getattr(self.fire_detector, "primary_hazard", None) == "smoke"
+                            or any(b.get("class_name") == "smoke" for b in fire_boxes)
+                        )
+                        is_fire = (
+                            getattr(self.fire_detector, "primary_hazard", None) in ["fire", "fire_and_smoke"]
+                            or any(b.get("class_name") == "fire" for b in fire_boxes)
+                            or not is_smoke
+                        )
+                        fire_detected = is_fire
+                        smoke_detected = is_smoke
+                        hazard_type = "smoke" if (is_smoke and not is_fire) else ("fire_and_smoke" if (is_smoke and is_fire) else "fire")
+                        now_ts = time.time()
+                        if (now_ts - self.last_fire_alert_time) >= self.fire_alert_cooldown:
+                            self.last_fire_alert_time = now_ts
+                            fire_payload = {
+                                "id": f"EVT-HAZARD-{int(now_ts)}",
+                                "time": datetime.now(IST).strftime("%H:%M:%S IST"),
+                                "zone": self.zone_name,
+                                "camera": self.camera_id,
+                                "type": "CRITICAL HAZARD: FIRE / SMOKE DETECTED",
+                                "level": "CRITICAL",
+                                "detail": f"Hazard identified on {self.camera_id} ({self.zone_name}). Immediate evacuation required.",
+                                "acknowledged": False,
+                            }
+                            logger.warning(f"WebSocket Hazard Alert Fired: {fire_payload}")
+                            alert_manager.broadcast_sync(fire_payload)
+                except Exception as e:
+                    logger.error(f"Error during ML fire detection: {e}")
+                    fire_detected = False
+                    smoke_detected = False
 
             # Sync compatibility aliases
             self.entry_count = self.down_count
@@ -569,7 +797,11 @@ class SpatialTracker:
                 "is_crowded": is_crowded,
                 "gathering_alert": is_crowded,
                 "fall_detected": fall_detected,
-                "fire_detected": False,
+                "fire_detected": fire_detected,
+                "smoke_detected": smoke_detected,
+                "hazard_type": hazard_type,
+                "stream_healthy": True,
+                "fps": reported_fps,
             }
 
         except Exception as e:
@@ -587,6 +819,10 @@ class SpatialTracker:
                 "gathering_alert": False,
                 "fall_detected": False,
                 "fire_detected": False,
+                "smoke_detected": False,
+                "hazard_type": None,
+                "stream_healthy": False,
+                "fps": 0,
             }
 
     def reset(self):
@@ -600,6 +836,9 @@ class SpatialTracker:
         self.track_center_y.clear()
         self.last_alert_time = 0.0
         self.last_fall_alert_time = 0.0
+        self.last_fire_alert_time = 0.0
+        if self.fire_detector is not None:
+            self.fire_detector.reset()
         self.fall_counters.clear()
         self.fall_consecutive_frames.clear()
         self.untracked_fall_counter = 0
