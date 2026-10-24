@@ -27,7 +27,7 @@ class AlertConnectionManager:
         Returns True if the camera stream is currently active with valid live frames.
         Returns False if the stream is offline, unassigned, or rendering STREAM OFFLINE.
         """
-        return self._stream_status.get(camera_id, True)
+        return self._stream_status.get(camera_id, False)
 
     def pause_stream_dispatch(self, camera_id: str):
         """Circuit breaker: completely pauses/stops alert dispatch for the specified camera."""
@@ -53,9 +53,9 @@ class AlertConnectionManager:
 
         # Circuit Breaker: Kill event dispatch for offline, unassigned, or invalid camera streams
         cam = message.get("camera")
-        if cam and not self.is_stream_active(cam):
+        if not cam or not self.is_stream_active(cam):
             logger.warning(
-                f"Circuit Breaker: Alert {message.get('id')} suppressed because {cam} is OFFLINE / INACTIVE."
+                f"Circuit Breaker: Alert {message.get('id')} suppressed because {cam} is OFFLINE / UNASSIGNED."
             )
             return
 
@@ -77,9 +77,9 @@ class AlertConnectionManager:
 
         # Circuit Breaker: Kill event dispatch for offline, unassigned, or invalid camera streams
         cam = message.get("camera")
-        if cam and not self.is_stream_active(cam):
+        if not cam or not self.is_stream_active(cam):
             logger.warning(
-                f"Circuit Breaker: Alert {message.get('id')} suppressed because {cam} is OFFLINE / INACTIVE."
+                f"Circuit Breaker: Alert {message.get('id')} suppressed because {cam} is OFFLINE / UNASSIGNED."
             )
             return
 

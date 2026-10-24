@@ -44,6 +44,9 @@ interface CameraChannel {
   isOnline: boolean;
   fps: number;
   resolution: string;
+  entry?: number;
+  exit?: number;
+  occupancy?: number;
 }
 
 interface AccessEvent {
@@ -522,6 +525,9 @@ export const App: React.FC = () => {
                     ...c,
                     fps: info.is_online ? info.fps : 0,
                     isOnline: c.sourceType === 'STANDBY' ? false : (info.is_online ?? c.isOnline),
+                    entry: info.entry ?? c.entry ?? 0,
+                    exit: info.exit ?? c.exit ?? 0,
+                    occupancy: info.occupancy ?? c.occupancy ?? 0,
                   };
                 }
                 return c;
@@ -555,6 +561,12 @@ export const App: React.FC = () => {
     // Reset error state for the reassigned camera
     setStreamErrors((prev) => ({ ...prev, [camId]: false }));
     setReconnectTicks((prev) => ({ ...prev, [camId]: Date.now() }));
+
+    if (sourceType === 'STANDBY') {
+      fetch(`http://127.0.0.1:8000/api/camera/${encodeURIComponent(camId)}/stop`, {
+        method: 'POST',
+      }).catch(() => {});
+    }
 
     setCameras((prev) =>
       prev.map((c) => {
@@ -820,6 +832,18 @@ export const App: React.FC = () => {
     return cameras; // 3x3 returns all 9
   }, [gridLayout, focusedCameraId, cameras]);
 
+  const totalOccupancy = useMemo(() => {
+    return cameras.reduce((acc, c) => acc + (c.occupancy ?? 0), 0);
+  }, [cameras]);
+
+  const totalEntries = useMemo(() => {
+    return cameras.reduce((acc, c) => acc + (c.entry ?? 0), 0);
+  }, [cameras]);
+
+  const totalExits = useMemo(() => {
+    return cameras.reduce((acc, c) => acc + (c.exit ?? 0), 0);
+  }, [cameras]);
+
   /* =========================================================================
      RENDER
      ========================================================================= */
@@ -848,6 +872,23 @@ export const App: React.FC = () => {
 
           {/* Infrastructure Health Bar & UTC Telemetry */}
           <div className="flex flex-wrap items-center gap-2.5 sm:gap-3 text-xs font-mono">
+            {/* Live Real-Time Occupancy Header Badge */}
+            <div
+              className="flex items-center gap-2 px-3 py-1.5 rounded bg-slate-950 border border-emerald-500/30 text-emerald-400 font-mono text-xs shadow-sm"
+              title="Real-Time Facility Occupancy (Calculated dynamically from active line-crossing counters)"
+            >
+              <div className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="text-slate-300 font-semibold">OCCUPANCY:</span>
+                <span className="font-bold text-emerald-400 text-sm">{totalOccupancy}</span>
+              </div>
+              <span className="text-slate-600">|</span>
+              <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                <span className="text-emerald-300 font-medium">IN: {totalEntries}</span>
+                <span className="text-slate-600">/</span>
+                <span className="text-amber-300 font-medium">OUT: {totalExits}</span>
+              </div>
+            </div>
             {/* FastAPI Backend Probe */}
             <div
               className={`flex items-center gap-2 px-3 py-1.5 rounded border transition-colors ${
@@ -1062,9 +1103,14 @@ export const App: React.FC = () => {
                             }
                           />
                           <span className="font-semibold text-slate-200 shrink-0">{cam.id}</span>
-                          <span className="text-slate-400 text-[11px]">
+                          <span className="text-slate-400 text-[11px] truncate max-w-[100px] sm:max-w-[140px]">
                             {cam.name}
                           </span>
+                          {cam.occupancy !== undefined && cam.isOnline && !isStandby && (
+                            <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-1.5 py-0.5 rounded text-[10px] font-mono shrink-0">
+                              OCC: {cam.occupancy} (IN: {cam.entry ?? 0} | OUT: {cam.exit ?? 0})
+                            </span>
+                          )}
                         </div>
 
                         {/* Action Icons */}

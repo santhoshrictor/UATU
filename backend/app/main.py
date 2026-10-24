@@ -275,9 +275,10 @@ class CameraDeviceWorker:
                 annotated_frame, counts = self.tracker.process_frame(frame, ret=ret)
                 self.current_fps = counts.get("fps", 30.0)
 
-                # Skip alert processing if stream health check failed
-                if not counts.get("stream_healthy", False):
+                # Skip alert processing if stream health check failed or stream is inactive
+                if not counts.get("stream_healthy", False) or not self.is_live or not self.tracker.is_stream_active or not alert_manager.is_stream_active(self.camera_id):
                     self.current_fps = 0.0
+                    alert_manager.pause_stream_dispatch(self.camera_id)
                     _, encoded = cv2.imencode(
                         ".jpg", annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
                     )
@@ -635,10 +636,19 @@ class FileStreamWorker:
 
     def _run(self):
         while self.running:
-            if not self.file_path.exists():
-                # Stream Health Guard: Missing file -> skip AI inference, suppress alerts, return clean offline frame
+            # 1. Unassigned / Standby Guard: If no active clients, halt background execution
+            if self.active_clients <= 0:
                 self.current_fps = 0.0
                 alert_manager.pause_stream_dispatch(self.camera_id)
+                self.tracker.is_stream_active = False
+                time.sleep(0.5)
+                continue
+
+            if not self.file_path.exists():
+                # 2. Offline Guard: Missing file -> halt inference, suppress alerts, return clean offline frame
+                self.current_fps = 0.0
+                alert_manager.pause_stream_dispatch(self.camera_id)
+                self.tracker.is_stream_active = False
                 offline_frame, _ = self.tracker.process_frame(None, ret=False)
                 _, encoded = cv2.imencode(
                     ".jpg", offline_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
@@ -649,12 +659,33 @@ class FileStreamWorker:
                 continue
 
             cap = cv2.VideoCapture(str(self.file_path))
+            if not cap.isOpened():
+                self.current_fps = 0.0
+                alert_manager.pause_stream_dispatch(self.camera_id)
+                self.tracker.is_stream_active = False
+                offline_frame, _ = self.tracker.process_frame(None, ret=False)
+                _, encoded = cv2.imencode(
+                    ".jpg", offline_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
+                )
+                with self.frame_lock:
+                    self.current_jpeg = encoded.tobytes()
+                time.sleep(1.0)
+                continue
+
             raw_fps = cap.get(cv2.CAP_PROP_FPS)
             self.fps = raw_fps if raw_fps and 5.0 <= raw_fps <= 60.0 else 25.0
             frame_delay = 1.0 / self.fps
 
             try:
                 while self.running:
+                    # Unassigned / Disconnected client guard inside loop
+                    if self.active_clients <= 0:
+                        self.current_fps = 0.0
+                        alert_manager.pause_stream_dispatch(self.camera_id)
+                        self.tracker.is_stream_active = False
+                        time.sleep(0.5)
+                        break
+
                     t_start = time.perf_counter()
                     ret, frame = cap.read()
                     if not ret or frame is None or frame.size == 0:
@@ -665,13 +696,14 @@ class FileStreamWorker:
                             # Stream Health Guard: End/Failure -> suppress alerts & return clean offline signal
                             self.current_fps = 0.0
                             alert_manager.pause_stream_dispatch(self.camera_id)
+                            self.tracker.is_stream_active = False
                             offline_frame, _ = self.tracker.process_frame(None, ret=False)
                             _, encoded = cv2.imencode(
                                 ".jpg", offline_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
                             )
                             with self.frame_lock:
                                 self.current_jpeg = encoded.tobytes()
-                            time.sleep(0.1)
+                            time.sleep(0.5)
                             continue
 
                     # Stream is valid and active: resume alert dispatch permissions
@@ -699,12 +731,22 @@ class FileStreamWorker:
                     # If stream health check returned unhealthy, skip alert dispatch
                     if not counts.get("stream_healthy", False):
                         self.current_fps = 0.0
+                        alert_manager.pause_stream_dispatch(self.camera_id)
                         _, encoded = cv2.imencode(
                             ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
                         )
                         with self.frame_lock:
                             self.current_jpeg = encoded.tobytes()
                         time.sleep(0.05)
+                        continue
+
+                    # Strict Alert Circuit Breaker: Only streams with an active, valid video source frame can trigger hazard alerts
+                    is_active = (
+                        alert_manager.is_stream_active(self.camera_id)
+                        and self.tracker.is_stream_active
+                        and counts.get("stream_healthy", False)
+                    )
+                    if not is_active:
                         continue
 
                     # Fall Detection Alert with 15s cooldown
@@ -757,13 +799,12 @@ class FileStreamWorker:
                     # Encode clean annotated frame directly
                     _, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                     jpeg_bytes = encoded.tobytes()
-
                     with self.frame_lock:
                         self.current_jpeg = jpeg_bytes
 
-                    elapsed = time.perf_counter() - t_start
-                    sleep_time = max(0.001, frame_delay - elapsed)
-                    time.sleep(sleep_time)
+                    t_proc = time.perf_counter() - t_start
+                    sleep_dur = max(0.005, frame_delay - t_proc)
+                    time.sleep(sleep_dur)
             finally:
                 cap.release()
 
@@ -922,8 +963,8 @@ def get_webcam_stream(device_id: int = 0):
 @app.get("/api/camera-telemetry")
 def get_camera_telemetry():
     """
-    Returns real-time processing FPS, health status, and metadata for all cameras.
-    Guarantees 0 FPS for offline or unassigned streams, and real-time FPS for active streams.
+    Returns real-time processing FPS, health status, line-crossing counters, and metadata for all cameras.
+    Guarantees 0 FPS for offline or unassigned streams, and real-time FPS/counts for active streams.
     """
     telemetry = {
         f"CAM-0{i}": {
@@ -931,6 +972,9 @@ def get_camera_telemetry():
             "is_online": False,
             "fps": 0,
             "status": "STREAM OFFLINE",
+            "entry": 0,
+            "exit": 0,
+            "occupancy": 0,
         }
         for i in range(1, 10)
     }
@@ -941,12 +985,18 @@ def get_camera_telemetry():
             cam_id = f"CAM-0{dev_id + 1}"
             is_active = worker.is_live and alert_manager.is_stream_active(cam_id)
             fps = float(getattr(worker, "current_fps", 0.0)) if is_active else 0.0
+            entry = int(getattr(worker.tracker, "down_count", 0)) if (is_active and hasattr(worker, "tracker")) else 0
+            exit = int(getattr(worker.tracker, "up_count", 0)) if (is_active and hasattr(worker, "tracker")) else 0
+            occupancy = int(getattr(worker.tracker, "occupancy_count", 0)) if (is_active and hasattr(worker, "tracker")) else 0
             telemetry[cam_id] = {
                 "camera_id": cam_id,
                 "is_online": is_active,
                 "fps": round(fps, 1) if is_active else 0,
                 "status": "LIVE" if is_active else "STREAM OFFLINE",
                 "device_id": dev_id,
+                "entry": entry,
+                "exit": exit,
+                "occupancy": occupancy,
             }
 
     # 2. File stream workers (Custom uploads / video loops)
@@ -955,15 +1005,32 @@ def get_camera_telemetry():
             cam_id = worker.camera_id
             is_active = worker.running and alert_manager.is_stream_active(cam_id)
             fps = float(getattr(worker, "current_fps", 0.0)) if is_active else 0.0
+            entry = int(getattr(worker.tracker, "down_count", 0)) if (is_active and hasattr(worker, "tracker")) else 0
+            exit = int(getattr(worker.tracker, "up_count", 0)) if (is_active and hasattr(worker, "tracker")) else 0
+            occupancy = int(getattr(worker.tracker, "occupancy_count", 0)) if (is_active and hasattr(worker, "tracker")) else 0
             telemetry[cam_id] = {
                 "camera_id": cam_id,
                 "is_online": is_active,
                 "fps": round(fps, 1) if is_active else 0,
                 "status": "LIVE" if is_active else "STREAM OFFLINE",
                 "zone": worker.zone,
+                "entry": entry,
+                "exit": exit,
+                "occupancy": occupancy,
             }
 
     return telemetry
+
+
+@app.post("/api/camera/{camera_id}/stop")
+def stop_camera_stream(camera_id: str):
+    """
+    Halts all background workers and pauses alert dispatch for the designated camera ID.
+    Used when a camera node is set to Unassigned/Standby.
+    """
+    multi_file_stream_manager.stop_camera(camera_id)
+    alert_manager.pause_stream_dispatch(camera_id)
+    return {"status": "STOPPED", "camera_id": camera_id}
 
 
 @app.post("/api/upload-video")

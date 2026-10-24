@@ -66,6 +66,7 @@ from backend.app.main import (
     VerifyAccessRequest,
     generate_file_stream,
     get_camera_telemetry,
+    stop_camera_stream,
 )
 from backend.app.access_engine import (
     AccessCorrelationEngine,
@@ -92,6 +93,7 @@ __all__ = [
     "VerifyAccessRequest",
     "generate_file_stream",
     "get_camera_telemetry",
+    "stop_camera_stream",
     "AccessCorrelationEngine",
     "access_engine",
     "evaluate_entry_event",

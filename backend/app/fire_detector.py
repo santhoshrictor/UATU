@@ -44,12 +44,17 @@ class FireDetector:
         fire_conf_threshold: float = 0.50,
         smoke_conf_threshold: float = 0.45,
         conf_threshold: float = None,
+        min_contour_area: int = 500,
         temporal_buffer_frames: int = 5,
         enable_motion_gate: bool = True,
         enable_smoke_heuristic: bool = True,
         is_webcam: bool = False,
+        min_contour_size: Optional[int] = None,
+        **kwargs,
     ):
         self.is_webcam = is_webcam
+        self.min_contour_area = min_contour_size if min_contour_size is not None else min_contour_area
+        self.min_contour_size = self.min_contour_area  # Compatibility alias
         # If webcam source, enforce strict conf=0.85 and disable diffuse smoke heuristics
         if is_webcam:
             self.fire_conf_threshold = 0.85
@@ -57,7 +62,7 @@ class FireDetector:
             self.enable_smoke_heuristic = False
         elif conf_threshold is not None:
             self.fire_conf_threshold = conf_threshold
-            self.smoke_conf_threshold = min(0.45, conf_threshold)
+            self.smoke_conf_threshold = conf_threshold
             self.enable_smoke_heuristic = enable_smoke_heuristic
         else:
             self.fire_conf_threshold = fire_conf_threshold
@@ -241,6 +246,13 @@ class FireDetector:
                     else:
                         continue
 
+                    # Contour size / bounding box area guard:
+                    # Small glints, headlights, or distant vehicle reflections are rejected
+                    box_w = max(0, x2 - x1)
+                    box_h = max(0, y2 - y1)
+                    if (box_w * box_h) < self.min_contour_area:
+                        continue
+
                     raw_candidates.append({
                         "class_id": matched_cls_id,
                         "class_name": class_name,
@@ -254,8 +266,14 @@ class FireDetector:
             if self.enable_smoke_heuristic:
                 heuristic_smoke = self._detect_dense_smoke_heuristic(annotated_frame, gray)
                 for h_cand in heuristic_smoke:
-                    # Check if already covered by ML candidate
+                    if float(h_cand.get("confidence", 0.0)) < self.smoke_conf_threshold:
+                        continue
                     h_box = h_cand["box"]
+                    bw = max(0, h_box[2] - h_box[0])
+                    bh = max(0, h_box[3] - h_box[1])
+                    if (bw * bh) < self.min_contour_area:
+                        continue
+                    # Check if already covered by ML candidate
                     is_duplicate = False
                     for existing in raw_candidates:
                         if compute_box_iou(h_box, existing["box"]) > 0.35:

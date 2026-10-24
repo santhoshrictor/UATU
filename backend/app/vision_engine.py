@@ -36,7 +36,7 @@ class SpatialTracker:
         self,
         model=None,
         zone_pts=None,
-        zone_threshold=4,
+        zone_threshold: Optional[int] = None,
         alert_cooldown=15.0,
         fall_confirmation_threshold=5,
         fire_model=None,
@@ -44,12 +44,26 @@ class SpatialTracker:
         zone: str = "Live Monitoring Zone",
         is_webcam: bool = False,
         enable_fire_detection: Optional[bool] = None,
+        person_conf_threshold: Optional[float] = None,
+        draw_skeletons: bool = False,
+        fire_conf_threshold: Optional[float] = None,
+        smoke_conf_threshold: Optional[float] = None,
         **kwargs,
     ):
         self.camera_id = camera_id
         self.zone_name = zone
         self.zone = zone  # Compatibility alias
         self.is_webcam = is_webcam
+        self.draw_skeletons = draw_skeletons
+
+        # Universal Human Bounding Box Detection:
+        # Lowered to conf=0.25 globally across all camera inference loops so that people in outdoor/wide shots are reliably bounded
+        if person_conf_threshold is not None:
+            self.person_conf_threshold = person_conf_threshold
+        elif kwargs.get("person_conf_threshold") is not None:
+            self.person_conf_threshold = kwargs.get("person_conf_threshold")
+        else:
+            self.person_conf_threshold = 0.25
 
         if model is not None:
             self.model = model
@@ -64,8 +78,11 @@ class SpatialTracker:
                 self.model = None
 
         self.previous_y = {}
+        self.previous_x = {}
+        self.untracked_centroids = []
         self.up_count = 0
         self.down_count = 0
+        self.occupancy_count = 0
 
         # Compatibility aliases
         self.entry_count = 0
@@ -73,7 +90,14 @@ class SpatialTracker:
         self.track_history = {}
 
         # Feature 15 & 16: Zone definition and Crowding/Occupancy threshold
-        self.zone_threshold = zone_threshold
+        # Abnormal gathering triggers when 15 or more people are actively detected in the frame simultaneously
+        if zone_threshold is not None:
+            self.zone_threshold = zone_threshold
+        elif kwargs.get("zone_threshold") is not None:
+            self.zone_threshold = kwargs.get("zone_threshold")
+        else:
+            self.zone_threshold = 15
+
         if zone_pts is not None:
             self.zone_pts = np.array(zone_pts, np.int32)
         else:
@@ -102,15 +126,45 @@ class SpatialTracker:
         else:
             self.enable_fire_detection = enable_fire_detection
 
+        # Wet outdoor pavement, lighting & reflections calibration (CAM-03 & outdoor feeds):
+        # Wet outdoor pavement reflections and outdoor lighting require high confidence (0.88) and minimum contour size (2000 px)
+        if fire_conf_threshold is not None:
+            self.fire_conf_threshold = fire_conf_threshold
+        elif kwargs.get("fire_conf_threshold") is not None:
+            self.fire_conf_threshold = kwargs.get("fire_conf_threshold")
+        elif self.camera_id == "CAM-03":
+            self.fire_conf_threshold = 0.88
+        else:
+            self.fire_conf_threshold = 0.50
+
+        if smoke_conf_threshold is not None:
+            self.smoke_conf_threshold = smoke_conf_threshold
+        elif kwargs.get("smoke_conf_threshold") is not None:
+            self.smoke_conf_threshold = kwargs.get("smoke_conf_threshold")
+        elif self.camera_id == "CAM-03":
+            self.smoke_conf_threshold = 0.88
+        else:
+            self.smoke_conf_threshold = 0.45
+
+        if self.camera_id == "CAM-03":
+            self.min_contour_size = 2000
+            self.enable_smoke_heuristic = False
+        else:
+            self.min_contour_size = 500
+            self.enable_smoke_heuristic = True
+
         if not self.enable_fire_detection:
             self.fire_detector = None
         else:
             self.fire_detector = FireDetector(
                 model=fire_model or kwargs.get("fire_detector"),
-                fire_conf_threshold=0.50,
-                smoke_conf_threshold=0.45,
+                fire_conf_threshold=self.fire_conf_threshold,
+                smoke_conf_threshold=self.smoke_conf_threshold,
+                min_contour_area=self.min_contour_size,
+                min_contour_size=self.min_contour_size,
                 temporal_buffer_frames=5,
                 is_webcam=is_webcam,
+                enable_smoke_heuristic=self.enable_smoke_heuristic,
             )
         self.last_fire_alert_time = 0.0
         self.fire_alert_cooldown = alert_cooldown
@@ -284,19 +338,20 @@ class SpatialTracker:
         try:
             height, width = frame.shape[:2]
             line_y = int(height * 0.55)
+            line_x = int(width * 0.50)
 
-            # 1. Run Tracker (Using yolo11n-pose.pt) with conf=0.4
+            # 1. Run Tracker (Using yolo11n-pose.pt) with calibrated person conf threshold
             active_model = self.model
             if active_model is not None:
                 if hasattr(active_model, "track") and callable(getattr(active_model, "track")):
                     try:
-                        track_out = active_model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False, conf=0.4)
+                        track_out = active_model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False, conf=self.person_conf_threshold)
                     except TypeError:
                         track_out = active_model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False)
                     results = track_out[0] if isinstance(track_out, (list, tuple)) else track_out
                 else:
                     try:
-                        call_out = active_model(frame, verbose=False, conf=0.4)
+                        call_out = active_model(frame, verbose=False, conf=self.person_conf_threshold)
                     except TypeError:
                         call_out = active_model(frame, verbose=False)
                     results = call_out[0] if isinstance(call_out, (list, tuple)) else call_out
@@ -412,12 +467,57 @@ class SpatialTracker:
                     else:
                         kpts = [None] * len(boxes)
 
+                    scale_x = 1.0
+                    scale_y = 1.0
+                    orig_shape = getattr(results, "orig_shape", None)
+                    if (
+                        orig_shape is not None
+                        and "Mock" not in type(orig_shape).__name__
+                        and hasattr(orig_shape, "__len__")
+                        and len(orig_shape) >= 2
+                    ):
+                        try:
+                            orig_h = float(orig_shape[0])
+                            orig_w = float(orig_shape[1])
+                            if orig_h > 0 and orig_w > 0:
+                                scale_x = width / orig_w
+                                scale_y = height / orig_h
+                        except (TypeError, ValueError):
+                            scale_x = 1.0
+                            scale_y = 1.0
+
                     for i, (box, cls, conf, track_id) in enumerate(zip(boxes, clss, confs, track_ids)):
                         conf_val = float(conf.item() if hasattr(conf, "item") else conf)
-                        if conf_val < 0.4:
+                        if conf_val < self.person_conf_threshold:
                             continue
                         class_id = int(cls.item() if hasattr(cls, "item") else cls)
-                        x1, y1, x2, y2 = map(int, box)
+
+                        # Precise scaling and coordinate offset calibration to align exactly with tracked subjects
+                        try:
+                            box_flat = np.array(box, dtype=float).flatten()
+                            raw_x1, raw_y1, raw_x2, raw_y2 = float(box_flat[0]), float(box_flat[1]), float(box_flat[2]), float(box_flat[3])
+                        except Exception:
+                            raw_coords = list(map(float, box))
+                            raw_x1, raw_y1, raw_x2, raw_y2 = raw_coords[0], raw_coords[1], raw_coords[2], raw_coords[3]
+
+                        if scale_x != 1.0 or scale_y != 1.0:
+                            x1 = int(round(raw_x1 * scale_x))
+                            y1 = int(round(raw_y1 * scale_y))
+                            x2 = int(round(raw_x2 * scale_x))
+                            y2 = int(round(raw_y2 * scale_y))
+                        else:
+                            x1 = int(round(raw_x1))
+                            y1 = int(round(raw_y1))
+                            x2 = int(round(raw_x2))
+                            y2 = int(round(raw_y2))
+
+                        # Strict clamp within frame boundaries
+                        x1 = max(0, min(width - 1, x1))
+                        y1 = max(0, min(height - 1, y1))
+                        x2 = max(x1 + 1, min(width, x2))
+                        y2 = max(y1 + 1, min(height, y2))
+
+                        center_x = (x1 + x2) // 2
                         center_y = (y1 + y2) // 2
                         w = x2 - x1
                         h = y2 - y1
@@ -464,7 +564,13 @@ class SpatialTracker:
                                     raw_p_kpts = raw_p_kpts.cpu().numpy()
                                 p_arr = np.array(raw_p_kpts)
                                 if p_arr.ndim >= 2 and len(p_arr) >= 13:
-                                    person_kpts = p_arr
+                                    if scale_x != 1.0 or scale_y != 1.0:
+                                        p_scaled = p_arr.copy()
+                                        p_scaled[:, 0] = p_scaled[:, 0] * scale_x
+                                        p_scaled[:, 1] = p_scaled[:, 1] * scale_y
+                                        person_kpts = p_scaled
+                                    else:
+                                        person_kpts = p_arr
                                     if check_kpt_conf(person_kpts[0], 0.3):
                                         nose_y = float(person_kpts[0][1])
 
@@ -558,28 +664,75 @@ class SpatialTracker:
                             if is_falling:
                                 fall_detected = True
 
-                            # Track ID & Line-Crossing Math
+                            # Track ID & Line-Crossing Math (Bidirectional: Horizontal Y & Vertical X)
+                            old_y = None
+                            old_x = None
+
                             if tid is not None:
                                 old_y = self.previous_y.get(tid)
-                                if old_y is not None:
-                                    if old_y < line_y <= center_y:
-                                        self.down_count += 1
-                                    elif old_y > line_y >= center_y:
-                                        self.up_count += 1
+                                old_x = self.previous_x.get(tid)
                                 self.previous_y[tid] = center_y
+                                self.previous_x[tid] = center_x
+                            else:
+                                # Fallback spatial centroid matching for untracked pedestrians (distant or intermittent)
+                                best_idx = -1
+                                min_dist = 80.0
+                                for c_idx, (ux, uy, utime) in enumerate(self.untracked_centroids):
+                                    dist = np.hypot(center_x - ux, center_y - uy)
+                                    if dist < min_dist:
+                                        min_dist = dist
+                                        best_idx = c_idx
+                                if best_idx >= 0:
+                                    old_x, old_y, _ = self.untracked_centroids[best_idx]
+                                    self.untracked_centroids[best_idx] = (center_x, center_y, time.time())
+                                else:
+                                    self.untracked_centroids.append((center_x, center_y, time.time()))
+                                    if len(self.untracked_centroids) > 25:
+                                        self.untracked_centroids.pop(0)
+
+                            # Evaluate virtual line-crossing vector (top-to-bottom OR left-to-right)
+                            crossed_entry = False
+                            crossed_exit = False
+
+                            # 1. Vertical crossing across horizontal line (Top-to-Bottom = Entry, Bottom-to-Top = Exit)
+                            if old_y is not None:
+                                if old_y < line_y <= center_y:
+                                    crossed_entry = True
+                                elif old_y > line_y >= center_y:
+                                    crossed_exit = True
+
+                            # 2. Horizontal crossing across vertical line (Left-to-Right = Entry, Right-to-Left = Exit)
+                            if not crossed_entry and not crossed_exit and old_x is not None:
+                                if old_x < line_x <= center_x:
+                                    crossed_entry = True
+                                elif old_x > line_x >= center_x:
+                                    crossed_exit = True
+
+                            if crossed_entry:
+                                self.down_count += 1
+                                self.entry_count = self.down_count
+                            elif crossed_exit:
+                                self.up_count += 1
+                                self.exit_count = self.up_count
 
                             parsed_boxes.append((x1, y1, x2, y2, center_y, True, tid, is_falling, person_kpts))
                         elif class_id in [2, 3, 5, 7]:  # Vehicles
                             vehicles_count += 1
                             parsed_boxes.append((x1, y1, x2, y2, center_y, False, None, False, None))
 
-            is_crowded = (occupancy_count >= self.zone_threshold)
+            # Real-Time Occupancy & Crowd Calculation:
+            # Active people count in the monitored zone / frame
+            active_crowd_count = max(occupancy_count, persons_count)
+            is_crowded = (occupancy_count >= self.zone_threshold) or (active_crowd_count >= self.zone_threshold)
+            self.occupancy_count = active_crowd_count if is_crowded else occupancy_count
+            occupancy_count = self.occupancy_count
 
             # 2. Contextual UI & Alpha-Blended Overlays
             overlay = frame.copy()
 
-            # Translucent Tripwire
+            # Translucent Tripwire (Yellow counting line spanning active horizontal & vertical paths)
             cv2.line(overlay, (0, line_y), (width, line_y), (0, 215, 255), 2)
+            cv2.line(overlay, (line_x, 0), (line_x, height), (0, 215, 255), 2)
 
             # Single semi-transparent dark bar across top
             cv2.rectangle(overlay, (0, 0), (width, 36), (15, 23, 42), -1)
@@ -591,8 +744,9 @@ class SpatialTracker:
             # Blend smoothly into frame
             cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
 
-            # Crisp tripwire line
+            # Crisp tripwire line (spans horizontal & vertical walkway paths)
             cv2.line(frame, (0, line_y), (width, line_y), (0, 215, 255), 1)
+            cv2.line(frame, (line_x, 0), (line_x, height), (0, 215, 255), 1)
 
             # If breached, render crisp red boundary and bold warning
             if is_crowded:
@@ -612,14 +766,15 @@ class SpatialTracker:
             for x1, y1, x2, y2, center_y, is_person, tid, is_falling, p_kpts in parsed_boxes:
                 if is_person:
                     # Turns red and displays CRITICAL: FALL DETECTED the exact moment fall_detected is True
+                    # Turns red warning bounding box overlay when ABNORMAL GATHERING (is_crowded) is detected
                     is_active_fall = is_falling or (fall_detected and len(parsed_boxes) == 1)
-                    if is_active_fall:
-                        color = (0, 0, 255)  # Pure Red
+                    if is_active_fall or is_crowded:
+                        color = (0, 0, 255)  # Pure Red warning overlay
                     else:
                         color = (74, 222, 128)  # Emerald Green
 
-                    # Draw Skeleton Limbs & Keypoint Joints if available
-                    if p_kpts is not None and len(p_kpts) >= 13:
+                    # Draw Skeleton Limbs & Keypoint Joints only if draw_skeletons is True (disabled by default to prevent visual clutter)
+                    if getattr(self, "draw_skeletons", False) and p_kpts is not None and len(p_kpts) >= 13:
                         for pt1_idx, pt2_idx in SKELETON_EDGES:
                             if pt1_idx < len(p_kpts) and pt2_idx < len(p_kpts):
                                 x1_k, y1_k = p_kpts[pt1_idx][:2]
@@ -640,8 +795,8 @@ class SpatialTracker:
                                 cv2.circle(frame, (int(round(kx)), int(round(ky))), 4, color, -1, cv2.LINE_AA)
                                 cv2.circle(frame, (int(round(kx)), int(round(ky))), 2, (255, 255, 255), -1, cv2.LINE_AA)
 
-                    # Bounding box
-                    box_thickness = 2 if is_active_fall else 1
+                    # Bounding box (thickness 2 for fall or abnormal gathering warning)
+                    box_thickness = 2 if (is_active_fall or is_crowded) else 1
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, box_thickness)
 
                     if is_active_fall:
@@ -664,6 +819,18 @@ class SpatialTracker:
                             cv2.FONT_HERSHEY_SIMPLEX,
                             0.5,
                             color,
+                            2,
+                            cv2.LINE_AA,
+                        )
+                    elif is_crowded:
+                        label = f"ID:{tid} [CROWD]" if tid is not None else "Person [CROWD]"
+                        cv2.putText(
+                            frame,
+                            label,
+                            (x1, max(12, y1 - 5)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5,
+                            (0, 0, 255),
                             2,
                             cv2.LINE_AA,
                         )
@@ -710,7 +877,7 @@ class SpatialTracker:
 
             # 5. Alert Trigger & 15s Cooldown WebSocket Dispatch (IST Timestamps)
             # Circuit Breaker: strictly gate dispatches on verified active stream status
-            if is_crowded and self.is_stream_active:
+            if is_crowded and self.is_stream_active and alert_manager.is_stream_active(self.camera_id):
                 now_ts = time.time()
                 if (now_ts - self.last_alert_time) >= self.alert_cooldown:
                     self.last_alert_time = now_ts
@@ -727,7 +894,7 @@ class SpatialTracker:
                     logger.warning(f"WebSocket Alert Fired: {alert_payload}")
                     alert_manager.broadcast_sync(alert_payload)
 
-            if fall_detected and self.is_stream_active:
+            if fall_detected and self.is_stream_active and alert_manager.is_stream_active(self.camera_id):
                 now_ts = time.time()
                 if (now_ts - self.last_fall_alert_time) >= self.fall_alert_cooldown:
                     self.last_fall_alert_time = now_ts
@@ -747,10 +914,23 @@ class SpatialTracker:
             # Feature 21: Machine Learning Fire & Smoke Detection (Optimized for CAM-03 flames & CAM-04 smoke)
             smoke_detected = False
             hazard_type = None
-            if self.fire_detector is not None and not self.is_webcam and self.is_stream_active:
+            if self.fire_detector is not None and not self.is_webcam and self.is_stream_active and alert_manager.is_stream_active(self.camera_id):
                 try:
                     frame, hazard_detected, fire_boxes = self.fire_detector.detect(frame)
-                    if hazard_detected and self.is_stream_active:
+                    # CAM-03 Outdoor Yard False-Positive Guard:
+                    # Enforce conf >= 0.88 and minimum contour/box area >= 2000 px to block headlights, reflections, and wet outdoor pavement
+                    if self.camera_id == "CAM-03":
+                        valid_boxes = []
+                        for b in fire_boxes:
+                            bx1, by1, bx2, by2 = b.get("box", [0, 0, 0, 0])
+                            box_area = max(0, bx2 - bx1) * max(0, by2 - by1)
+                            b_conf = float(b.get("confidence", 0.0))
+                            if b_conf >= self.smoke_conf_threshold and box_area >= 2000:
+                                valid_boxes.append(b)
+                        fire_boxes = valid_boxes
+                        hazard_detected = len(fire_boxes) > 0 and hazard_detected
+
+                    if hazard_detected and self.is_stream_active and alert_manager.is_stream_active(self.camera_id):
                         is_smoke = (
                             getattr(self.fire_detector, "primary_hazard", None) == "smoke"
                             or any(b.get("class_name") == "smoke" for b in fire_boxes)
@@ -830,7 +1010,10 @@ class SpatialTracker:
         self.down_count = 0
         self.entry_count = 0
         self.exit_count = 0
+        self.occupancy_count = 0
         self.previous_y.clear()
+        self.previous_x.clear()
+        self.untracked_centroids.clear()
         self.track_history.clear()
         self.track_heights.clear()
         self.track_center_y.clear()

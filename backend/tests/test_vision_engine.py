@@ -946,13 +946,13 @@ def test_bounding_box_turns_red_when_fall_detected():
 def test_skeleton_drawing_limbs_and_joints():
     """
     Verifies Section 1: Skeleton Overlay
-    - Draws lines between keypoints (limbs)
-    - Draws joint circles
-    - Uses Emerald Green for normal posture, and Pure Red for fall detection
+    - By default (draw_skeletons=False), skeleton joint lines and keypoint dots are HIDDEN from video frame
+    - Pose estimation continues running in the background for fall detection logic
+    - When draw_skeletons=True, draws Emerald Green for normal posture and Pure Red for fall detection
     """
     blank = np.zeros((480, 640, 3), dtype=np.uint8)
 
-    # Case A: Upright person (Green skeleton)
+    # Case A: Upright person with default draw_skeletons=False (hidden overlays)
     p_upright = MagicMock()
     p_upright.cls = [MagicMock(item=lambda: 0)]
     p_upright.conf = [MagicMock(item=lambda: 0.95)]
@@ -964,13 +964,14 @@ def test_skeleton_drawing_limbs_and_joints():
     mock_model.track.return_value = [res_upright]
 
     tracker = SpatialTracker(model=mock_model)
+    assert tracker.draw_skeletons is False
     annotated_upright, counts_upright = tracker.process_frame(blank.copy())
     assert counts_upright["fall_detected"] is False
 
-    # Joint at (150, 80) should have Green (74, 222, 128)
-    assert annotated_upright[80, 150, 1] > 200
+    # Joint at (150, 80) should NOT have green drawn by default (skeletons hidden)
+    assert annotated_upright[80, 150, 1] == 0
 
-    # Case B: Fallen person (Red skeleton after 5 consecutive frames)
+    # Case B: Fallen person with default draw_skeletons=False -> pose estimation runs in background, fall detected!
     p_fallen = MagicMock()
     p_fallen.cls = [MagicMock(item=lambda: 0)]
     p_fallen.conf = [MagicMock(item=lambda: 0.95)]
@@ -982,12 +983,18 @@ def test_skeleton_drawing_limbs_and_joints():
 
     for _ in range(4):
         tracker.process_frame(blank.copy())
-    # Frame 5: 5th consecutive fallen frame -> confirmed
+    # Frame 5: 5th consecutive fallen frame -> confirmed in background!
     annotated_fallen, counts_fallen = tracker.process_frame(blank.copy())
     assert counts_fallen["fall_detected"] is True
+    # Joint at (250, 380) is NOT drawn on frame by default (hidden skeletal overlays)
+    assert annotated_fallen[380, 250, 2] == 0
 
-    # Joint at (250, 380) should have Red (0, 0, 255)
-    assert annotated_fallen[380, 250, 2] > 200
+    # Case C: Explicitly enabled draw_skeletons=True
+    tracker_drawn = SpatialTracker(model=mock_model, draw_skeletons=True)
+    assert tracker_drawn.draw_skeletons is True
+    mock_model.track.return_value = [res_upright]
+    annotated_drawn, _ = tracker_drawn.process_frame(blank.copy())
+    assert annotated_drawn[80, 150, 1] > 200
 
 
 def test_simplified_pose_fall_math_rules():
@@ -1293,7 +1300,7 @@ def test_cam06_hazard_alert_dispatch_and_cooldown():
 def test_camera_telemetry_endpoint():
     """
     Verifies that /api/camera-telemetry returns all cameras, reporting 0 FPS for offline
-    and actual processing FPS for active streams.
+    and actual processing FPS/entry/exit/occupancy counts for active streams.
     """
     from fastapi.testclient import TestClient
     from backend.app.main import app
@@ -1307,7 +1314,552 @@ def test_camera_telemetry_endpoint():
     assert "CAM-03" in data
     assert "CAM-05" in data
     assert "CAM-06" in data
-    # Offline streams must explicitly report 0 FPS
+    # Offline streams must explicitly report 0 FPS and 0 counts
     assert data["CAM-04"]["fps"] == 0
     assert data["CAM-04"]["is_online"] is False
+    assert data["CAM-04"]["entry"] == 0
+    assert data["CAM-04"]["exit"] == 0
+    assert data["CAM-04"]["occupancy"] == 0
+
+
+def test_line_crossing_tripwire_top_to_bottom_and_bottom_to_top():
+    """
+    Verifies that a tracked person crossing horizontal tripwire (line_y = 480 * 0.55 = 264)
+    from top-to-bottom increments ENTRY and bottom-to-top increments EXIT.
+    """
+    tracker = SpatialTracker(model=None, camera_id="CAM-03", zone="Logistics Yard North")
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # Helper to create mock detection with track id
+    def make_person(tid, y_center, x_center=200):
+        mock_model = MagicMock()
+        mock_result = MagicMock()
+        mock_boxes = MagicMock()
+        # Bounding box: height 100, width 60
+        y1 = y_center - 50
+        y2 = y_center + 50
+        x1 = x_center - 30
+        x2 = x_center + 30
+        mock_boxes.xyxy = np.array([[x1, y1, x2, y2]])
+        mock_boxes.cls = np.array([0])
+        mock_boxes.conf = np.array([0.80])
+        mock_boxes.id = np.array([tid])
+        mock_result.boxes = mock_boxes
+        mock_result.keypoints = None
+        mock_model.track.return_value = [mock_result]
+        return mock_model
+
+    # Frame 1: Person 1 outside/above line_y (center_y = 70 < 264, feet_y = 120 < 150)
+    tracker.model = make_person(1, y_center=70)
+    _, counts1 = tracker.process_frame(frame, ret=True)
+    assert counts1["entry"] == 0
+    assert counts1["exit"] == 0
+    assert counts1["occupancy"] == 0
+
+    # Frame 2: Person 1 moves downwards below line_y into zone (center_y = 280 > 264, feet_y = 330) -> ENTRY!
+    tracker.model = make_person(1, y_center=280)
+    _, counts2 = tracker.process_frame(frame, ret=True)
+    assert counts2["entry"] == 1
+    assert counts2["exit"] == 0
+    assert counts2["occupancy"] == 1
+
+    # Frame 3: Person 1 moves back up above line_y and outside zone (center_y = 70 < 264, feet_y = 120) -> EXIT!
+    tracker.model = make_person(1, y_center=70)
+    _, counts3 = tracker.process_frame(frame, ret=True)
+    assert counts3["entry"] == 1
+    assert counts3["exit"] == 1
+    assert counts3["occupancy"] == 0
+
+
+def test_line_crossing_tripwire_lateral_left_to_right_and_right_to_left():
+    """
+    Verifies that a tracked person crossing vertical tripwire (line_x = 640 * 0.50 = 320)
+    from left-to-right increments ENTRY and right-to-left increments EXIT.
+    """
+    tracker = SpatialTracker(model=None, camera_id="CAM-03", zone="Logistics Yard North")
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    def make_person(tid, x_center, y_center=200):
+        mock_model = MagicMock()
+        mock_result = MagicMock()
+        mock_boxes = MagicMock()
+        y1 = y_center - 40
+        y2 = y_center + 40
+        x1 = x_center - 25
+        x2 = x_center + 25
+        mock_boxes.xyxy = np.array([[x1, y1, x2, y2]])
+        mock_boxes.cls = np.array([0])
+        mock_boxes.conf = np.array([0.75])
+        mock_boxes.id = np.array([tid])
+        mock_result.boxes = mock_boxes
+        mock_result.keypoints = None
+        mock_model.track.return_value = [mock_result]
+        return mock_model
+
+    # Frame 1: Person 2 to the left of line_x and outside zone (center_x = 50 < 320, feet_x = 50 < 100)
+    tracker.model = make_person(2, x_center=50)
+    _, counts1 = tracker.process_frame(frame, ret=True)
+    assert counts1["entry"] == 0
+    assert counts1["exit"] == 0
+    assert counts1["occupancy"] == 0
+
+    # Frame 2: Person 2 walks laterally across line_x to right into zone (center_x = 345 > 320) -> ENTRY!
+    tracker.model = make_person(2, x_center=345)
+    _, counts2 = tracker.process_frame(frame, ret=True)
+    assert counts2["entry"] == 1
+    assert counts2["exit"] == 0
+    assert counts2["occupancy"] == 1
+
+    # Frame 3: Person 2 walks back to left across line_x and outside zone (center_x = 50 < 320) -> EXIT!
+    tracker.model = make_person(2, x_center=50)
+    _, counts3 = tracker.process_frame(frame, ret=True)
+    assert counts3["entry"] == 1
+    assert counts3["exit"] == 1
+    assert counts3["occupancy"] == 0
+
+
+def test_distant_pedestrian_conf_threshold():
+    """
+    Verifies that pedestrians with confidence between 0.35 and 0.40 are accepted and bounded.
+    """
+    tracker = SpatialTracker(model=None, camera_id="CAM-03", zone="Logistics Yard North")
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    mock_model = MagicMock()
+    mock_result = MagicMock()
+    mock_boxes = MagicMock()
+    # Pedestrian with conf = 0.36 (below 0.40, but above 0.35)
+    mock_boxes.xyxy = np.array([[100, 100, 140, 220]])
+    mock_boxes.cls = np.array([0])
+    mock_boxes.conf = np.array([0.36])
+    mock_boxes.id = np.array([10])
+    mock_result.boxes = mock_boxes
+    mock_result.keypoints = None
+    mock_model.track.return_value = [mock_result]
+    tracker.model = mock_model
+
+    _, counts = tracker.process_frame(frame, ret=True)
+    assert counts["persons"] == 1
+
+
+def test_unassigned_camera_alerts_suppressed_by_default():
+    """
+    Verifies that unassigned cameras default to is_stream_active = False,
+    and any attempt to dispatch WebSocket alerts is completely suppressed by circuit breaker.
+    """
+    from backend.app.core.websocket_manager import alert_manager
+    from backend.main import dispatch_hazard_alert
+
+    mock_ws = AsyncMock()
+    alert_manager.active_connections = [mock_ws]
+    try:
+        # Camera CAM-99 has never been registered as active
+        assert alert_manager.is_stream_active("CAM-99") is False
+
+        # Attempt to broadcast alert for unassigned camera
+        payload = {
+            "id": "EVT-TEST-UNASSIGNED",
+            "time": "12:00:00 IST",
+            "camera": "CAM-99",
+            "zone": "Test Zone",
+            "type": "CRITICAL HAZARD",
+        }
+        alert_manager.broadcast_sync(payload)
+        assert mock_ws.send_text.call_count == 0
+
+        # dispatch_hazard_alert must also return None for unassigned camera
+        res = dispatch_hazard_alert(camera_id="CAM-99", zone="Test Zone")
+        assert res is None
+        assert mock_ws.send_text.call_count == 0
+    finally:
+        alert_manager.active_connections.clear()
+
+
+def test_stop_camera_stream_endpoint():
+    """
+    Verifies that POST /api/camera/{camera_id}/stop pauses stream dispatch
+    and halts active file stream workers.
+    """
+    from fastapi.testclient import TestClient
+    from backend.app.main import app
+    from backend.app.core.websocket_manager import alert_manager
+
+    client = TestClient(app)
+    # Resume CAM-07 first
+    alert_manager.resume_stream_dispatch("CAM-07")
+    assert alert_manager.is_stream_active("CAM-07") is True
+
+    # Call stop endpoint
+    res = client.post("/api/camera/CAM-07/stop")
+    assert res.status_code == 200
+    assert res.json() == {"status": "STOPPED", "camera_id": "CAM-07"}
+    assert alert_manager.is_stream_active("CAM-07") is False
+
+
+def test_file_stream_worker_halts_when_unassigned():
+    """
+    Verifies that FileStreamWorker with active_clients = 0 pauses alert dispatch
+    and does not evaluate AI inference.
+    """
+    from pathlib import Path
+    from backend.app.main import FileStreamWorker
+    from backend.app.core.websocket_manager import alert_manager
+
+    worker = FileStreamWorker(
+        file_path=Path("non_existent_stream.mp4"),
+        overlay_label="TEST",
+        camera_id="CAM-88",
+        zone="Zone 88",
+    )
+    assert worker.active_clients == 0
+    # Before starting, worker has 0 clients
+    alert_manager.resume_stream_dispatch("CAM-88")
+    assert alert_manager.is_stream_active("CAM-88") is True
+
+    # Simulate one loop iteration when active_clients <= 0
+    worker.active_clients = 0
+    # When active_clients is 0, alert dispatch must be paused
+    alert_manager.pause_stream_dispatch("CAM-88")
+    worker.tracker.is_stream_active = False
+
+    assert alert_manager.is_stream_active("CAM-88") is False
+    assert worker.tracker.is_stream_active is False
+
+
+def test_cam03_fire_conf_and_contour_size_configuration():
+    """
+    Verifies that CAM-03 outdoor yard stream specifically configures FireDetector
+    with conf=0.88 and min_contour_size=2000 px, eliminating wet pavement and reflections,
+    whereas other cameras retain standard thresholds.
+    """
+    mock_model = MagicMock()
+    mock_fire_model = MagicMock()
+    mock_fire_model.names = {0: "fire", 1: "smoke"}
+
+    # CAM-03: outdoor yard calibration
+    tracker_cam03 = SpatialTracker(
+        model=mock_model,
+        fire_model=mock_fire_model,
+        camera_id="CAM-03",
+        zone="Logistics Yard North",
+    )
+    assert tracker_cam03.fire_conf_threshold == 0.88
+    assert tracker_cam03.smoke_conf_threshold == 0.88
+    assert tracker_cam03.min_contour_size == 2000
+    assert tracker_cam03.fire_detector.fire_conf_threshold == 0.88
+    assert tracker_cam03.fire_detector.smoke_conf_threshold == 0.88
+    assert tracker_cam03.fire_detector.min_contour_area == 2000
+
+    # CAM-04 / CAM-06: standard industrial channels
+    tracker_cam04 = SpatialTracker(
+        model=mock_model,
+        fire_model=mock_fire_model,
+        camera_id="CAM-04",
+        zone="Precision Machining",
+    )
+    assert tracker_cam04.fire_conf_threshold == 0.50
+    assert tracker_cam04.smoke_conf_threshold == 0.45
+    assert tracker_cam04.min_contour_size == 500
+    assert tracker_cam04.fire_detector.fire_conf_threshold == 0.50
+    assert tracker_cam04.fire_detector.smoke_conf_threshold == 0.45
+    assert tracker_cam04.fire_detector.min_contour_area == 500
+
+
+def test_cam03_fire_false_trigger_rejection():
+    """
+    Verifies that CAM-03 rejects candidate detections from wet pavement reflections,
+    vehicle headlights, sun glare, or reflections with conf < 0.88 or contour area < 2000 px,
+    completely eliminating false hazard alerts.
+    """
+    from backend.app.core.websocket_manager import alert_manager
+
+    mock_model = MagicMock()
+    mock_model.track.return_value = [MagicMock(boxes=[])]
+    mock_fire_model = MagicMock()
+    mock_fire_model.names = {0: "fire", 1: "smoke"}
+
+    tracker = SpatialTracker(
+        model=mock_model,
+        fire_model=mock_fire_model,
+        camera_id="CAM-03",
+        zone="Logistics Yard North",
+    )
+    tracker.is_stream_active = True
+    alert_manager.resume_stream_dispatch("CAM-03")
+
+    # Case 1: Outdoor wet pavement reflection (conf=0.85 < 0.88, small glint box 20x20 = 400 < 2000)
+    glint_box = MagicMock()
+    glint_box.conf = [0.85]
+    glint_box.cls = [0]
+    glint_box.xyxy = [np.array([100, 100, 120, 120])]  # 20x20 area = 400 px
+    mock_fire_model.return_value = [MagicMock(boxes=[glint_box])]
+
+    frame1 = np.ones((480, 640, 3), dtype=np.uint8) * 50
+    frame2 = np.ones((480, 640, 3), dtype=np.uint8) * 100
+
+    # Send motion frames
+    tracker.process_frame(frame1)
+    _, counts = tracker.process_frame(frame2)
+    assert counts["fire_detected"] is False
+    assert counts.get("hazard_type") is None
+
+    # Case 2: Vehicle reflection with conf 0.89 >= 0.88, but small contour area (30x30 = 900 < 2000 px)
+    small_bright_box = MagicMock()
+    small_bright_box.conf = [0.89]
+    small_bright_box.cls = [0]
+    small_bright_box.xyxy = [np.array([100, 100, 130, 130])]  # 30x30 area = 900 px
+    mock_fire_model.return_value = [MagicMock(boxes=[small_bright_box])]
+
+    frame3 = np.ones((480, 640, 3), dtype=np.uint8) * 120
+    _, counts_small = tracker.process_frame(frame3)
+    assert counts_small["fire_detected"] is False
+
+    # Case 3: Genuine massive fire hazard (conf=0.92 >= 0.88, contour area 60x60 = 3600 >= 2000 px)
+    real_fire_box = MagicMock()
+    real_fire_box.conf = [0.92]
+    real_fire_box.cls = [0]
+    real_fire_box.xyxy = [np.array([100, 100, 160, 160])]  # 60x60 area = 3600 px
+    mock_fire_model.return_value = [MagicMock(boxes=[real_fire_box])]
+
+    # Must pass temporal buffer of 5 frames
+    for i in range(5):
+        dynamic_frame = np.ones((480, 640, 3), dtype=np.uint8) * (130 + i * 10)
+        _, res_counts = tracker.process_frame(dynamic_frame)
+
+    assert res_counts["fire_detected"] is True
+    assert res_counts.get("hazard_type") == "fire"
+
+
+def test_abnormal_gathering_does_not_trigger_from_cumulative_drift():
+    """
+    Verifies that real-time occupancy calculation is strictly derived from the actual
+    number of active, currently tracked bounding boxes in the frame/zone, and does NOT
+    trigger ABNORMAL GATHERING from cumulative IN - OUT counter drift.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    mock_model = MagicMock()
+    tracker = SpatialTracker(
+        model=mock_model,
+        zone_threshold=4,
+        camera_id="CAM-02",
+        zone="Zone 01 // Optical Turnstile B",
+    )
+    # Simulate historical drift where 12 entries and 2 exits occurred over time
+    tracker.down_count = 12
+    tracker.entry_count = 12
+    tracker.up_count = 2
+    tracker.exit_count = 2
+    # Net cumulative difference is 10, which exceeds zone_threshold=4
+
+    # Frame with only 2 currently active tracked persons inside the zone
+    active_persons = []
+    for idx, x_pos in enumerate([200, 300]):
+        p = MagicMock()
+        p.cls = [MagicMock(item=lambda: 0)]
+        p.conf = [MagicMock(item=lambda: 0.90)]
+        p.xyxy = [np.array([x_pos - 20, 180, x_pos + 20, 300])]
+        p.id = MagicMock(item=lambda i=idx + 1: i)
+        active_persons.append(p)
+
+    mock_res = MagicMock(boxes=active_persons, keypoints=None)
+    mock_model.track.return_value = [mock_res]
+
+    with patch("backend.app.vision_engine.alert_manager.broadcast_sync") as mock_broadcast:
+        _, counts = tracker.process_frame(blank.copy())
+
+        # Cumulative entry/exit counters remain preserved
+        assert counts["entry"] == 12
+        assert counts["exit"] == 2
+
+        # Real-time occupancy MUST strictly be 2 (actual active persons), NOT 10!
+        assert counts["occupancy"] == 2
+        assert counts["occupancy_count"] == 2
+        assert counts["is_crowded"] is False
+        assert counts["gathering_alert"] is False
+
+        # No ABNORMAL GATHERING WebSocket alert should be fired!
+        assert mock_broadcast.call_count == 0
+
+    # Next frame: 4 active persons arrive inside the zone (reaches zone_threshold=4)
+    crowd_persons = []
+    for idx, x_pos in enumerate([150, 250, 350, 450]):
+        p = MagicMock()
+        p.cls = [MagicMock(item=lambda: 0)]
+        p.conf = [MagicMock(item=lambda: 0.90)]
+        p.xyxy = [np.array([x_pos - 20, 180, x_pos + 20, 300])]
+        p.id = MagicMock(item=lambda i=idx + 1: i)
+        crowd_persons.append(p)
+
+    mock_res_crowd = MagicMock(boxes=crowd_persons, keypoints=None)
+    mock_model.track.return_value = [mock_res_crowd]
+    tracker.is_stream_active = True
+
+    from backend.app.core.websocket_manager import alert_manager
+    alert_manager.resume_stream_dispatch("CAM-02")
+
+    with patch("backend.app.vision_engine.alert_manager.broadcast_sync") as mock_broadcast:
+        _, counts_crowd = tracker.process_frame(blank.copy())
+
+        assert counts_crowd["occupancy"] == 4
+        assert counts_crowd["is_crowded"] is True
+        assert counts_crowd["gathering_alert"] is True
+        assert mock_broadcast.call_count == 1
+        payload = mock_broadcast.call_args[0][0]
+        assert payload["type"] == "ABNORMAL GATHERING"
+        assert payload["camera"] == "CAM-02"
+
+
+def test_universal_human_bounding_box_conf_025():
+    """
+    Verifies that the person detection confidence threshold is lowered to conf=0.25
+    globally across all camera feeds, and no pixel-area filter rejects small or distant pedestrians.
+    """
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # Global conf=0.25 across all camera IDs
+    for cam_id in ["CAM-01", "CAM-02", "CAM-03", "CAM-04", "CAM-06"]:
+        tracker = SpatialTracker(camera_id=cam_id)
+        assert tracker.person_conf_threshold == 0.25, f"Camera {cam_id} must have global person_conf_threshold=0.25"
+
+    tracker_wide = SpatialTracker(camera_id="CAM-03", zone="Logistics Yard North")
+    assert tracker_wide.person_conf_threshold == 0.25
+
+    # Small/distant pedestrian in wide-angle shot (e.g. 15x35 px, conf=0.26)
+    mock_model = MagicMock()
+    mock_res = MagicMock()
+    small_p_box = MagicMock()
+    small_p_box.xyxy = [np.array([120, 150, 135, 185])]  # 15x35 = 525 px area
+    small_p_box.cls = [MagicMock(item=lambda: 0)]
+    small_p_box.conf = [MagicMock(item=lambda: 0.26)]
+    small_p_box.id = MagicMock(item=lambda: 7)
+    mock_res.boxes = [small_p_box]
+    mock_res.keypoints = None
+    mock_model.track.return_value = [mock_res]
+
+    tracker_wide.model = mock_model
+    annotated, counts = tracker_wide.process_frame(frame.copy(), ret=True)
+    assert counts["persons"] == 1, "Small/distant pedestrian with conf=0.26 must be reliably bounded"
+
+    # Sub-threshold detection (conf=0.22 < 0.25) is filtered out
+    sub_p_box = MagicMock()
+    sub_p_box.xyxy = [np.array([120, 150, 135, 185])]
+    sub_p_box.cls = [MagicMock(item=lambda: 0)]
+    sub_p_box.conf = [MagicMock(item=lambda: 0.22)]
+    sub_p_box.id = MagicMock(item=lambda: 8)
+    mock_res.boxes = [sub_p_box]
+
+    _, counts_sub = tracker_wide.process_frame(frame.copy(), ret=True)
+    assert counts_sub["persons"] == 0, "Detections with conf < 0.25 must be filtered out"
+
+
+def test_abnormal_gathering_15_plus_people_red_overlay_and_alert():
+    """
+    Verifies that when the active count of detected people reaches or exceeds 15,
+    it draws the red warning bounding box overlay and pushes the ABNORMAL GATHERING alert
+    payload to the WebSocket queue. If fewer than 15 people are detected, no alert fires.
+    """
+    from backend.app.core.websocket_manager import alert_manager
+
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    tracker = SpatialTracker(camera_id="CAM-03", zone="Logistics Yard North")
+    assert tracker.zone_threshold == 15
+    tracker.is_stream_active = True
+    alert_manager.resume_stream_dispatch("CAM-03")
+
+    # Case 1: 14 people active (below threshold 15) -> normal green bounding boxes, no alert
+    persons_14 = []
+    for i in range(14):
+        p = MagicMock()
+        p.cls = [MagicMock(item=lambda: 0)]
+        p.conf = [MagicMock(item=lambda: 0.85)]
+        x = 20 + (i % 8) * 60
+        y = 100 + (i // 8) * 100
+        p.xyxy = [np.array([x, y, x + 35, y + 80])]
+        p.id = MagicMock(item=lambda idx=i: idx + 1)
+        persons_14.append(p)
+
+    mock_res_14 = MagicMock(boxes=persons_14, keypoints=None)
+    mock_model = MagicMock()
+    mock_model.track.return_value = [mock_res_14]
+    tracker.model = mock_model
+
+    with patch("backend.app.vision_engine.alert_manager.broadcast_sync") as mock_broadcast:
+        annotated_14, counts_14 = tracker.process_frame(blank.copy(), ret=True)
+        assert counts_14["persons"] == 14
+        assert counts_14["is_crowded"] is False
+        assert counts_14["gathering_alert"] is False
+        assert mock_broadcast.call_count == 0
+
+    # Case 2: 15 people active (reaches abnormal gathering threshold 15) -> red bounding boxes + WebSocket alert
+    persons_15 = []
+    for i in range(15):
+        p = MagicMock()
+        p.cls = [MagicMock(item=lambda: 0)]
+        p.conf = [MagicMock(item=lambda: 0.85)]
+        x = 20 + (i % 8) * 60
+        y = 100 + (i // 8) * 100
+        p.xyxy = [np.array([x, y, x + 35, y + 80])]
+        p.id = MagicMock(item=lambda idx=i: idx + 1)
+        persons_15.append(p)
+
+    mock_res_15 = MagicMock(boxes=persons_15, keypoints=None)
+    mock_model.track.return_value = [mock_res_15]
+    tracker.model = mock_model
+
+    with patch("backend.app.vision_engine.alert_manager.broadcast_sync") as mock_broadcast:
+        annotated_15, counts_15 = tracker.process_frame(blank.copy(), ret=True)
+        assert counts_15["persons"] == 15
+        assert counts_15["is_crowded"] is True
+        assert counts_15["gathering_alert"] is True
+
+        # Red bounding box warning overlay must be present on frame
+        # BGR: Red channel is index 2, Green is index 1, Blue is index 0
+        assert np.any(annotated_15[:, :, 2] > 200)
+
+        # WebSocket alert payload verification
+        assert mock_broadcast.call_count == 1
+        payload = mock_broadcast.call_args[0][0]
+        assert payload["type"] == "ABNORMAL GATHERING"
+        assert payload["camera"] == "CAM-03"
+        assert payload["level"] == "CRITICAL"
+
+
+def test_bounding_box_scaling_and_alignment():
+    """
+    Verifies that detection bounding boxes:
+    1. Scale and align precisely when orig_shape differs from frame shape
+    2. Clamp strictly to frame boundaries without out-of-bounds coordinate offset
+    """
+    # 640x480 frame
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    p_scaled = MagicMock()
+    p_scaled.cls = [MagicMock(item=lambda: 0)]
+    p_scaled.conf = [MagicMock(item=lambda: 0.90)]
+    # Bounding box in 320x240 coordinates: [50, 60, 150, 180]
+    p_scaled.xyxy = [np.array([50.0, 60.0, 150.0, 180.0])]
+    p_scaled.id = MagicMock(item=lambda: 1)
+
+    mock_res = MagicMock(boxes=[p_scaled], keypoints=None)
+    # orig_shape is 320x240 (half resolution of 640x480)
+    mock_res.orig_shape = (240, 320)
+
+    mock_model = MagicMock()
+    mock_model.track.return_value = [mock_res]
+
+    tracker = SpatialTracker(model=mock_model, draw_skeletons=False)
+    annotated, counts = tracker.process_frame(frame.copy(), ret=True)
+
+    assert counts["persons"] == 1
+    # Scaled coordinates in 640x480 should be: x1=100, y1=120, x2=300, y2=360
+    # Emerald green border (74, 222, 128) must be rendered around the scaled box
+    assert annotated[120, 100, 1] > 200
+    assert annotated[360, 300, 1] > 200
+
+
+
+
+
 

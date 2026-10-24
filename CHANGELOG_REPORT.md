@@ -1057,7 +1057,216 @@ This document provides a permanent, auditable ledger of all file additions, conf
      - Full test suite verified: **64/64 tests passing** across `backend/tests/` (100% pass rate).
      - Frontend production bundle built cleanly with `npm.cmd run build` (0 errors).
      - Live Uvicorn server restarted and verified via `http://127.0.0.1:8000/api/camera-telemetry`.
-- **Technical Justification:** Guarantees reliable automated hazard incident dispatching across all monitored video channels while ensuring telemetry badges reflect truthful operational performance metrics without phantom frames.
+---
+
+#### 2026-10-24 17:25:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/app/main.py`, `frontend/src/App.tsx`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `UPDATE`
+- **Summary:** Calibrated CAM-03 line-crossing tripwire and resolved real-time occupancy counting and telemetry badge updating:
+  1. **Line-Crossing Tripwire Calibration (`vision_engine.py`):**
+     - **Active Walkway Vector Spans:** Calibrated horizontal tripwire coordinates (`line_y = int(height * 0.55)`) and vertical tripwire coordinates (`line_x = int(width * 0.50)`), ensuring virtual counting lines span both longitudinal and lateral walkways on CAM-03.
+     - **Lowered Confidence Threshold (`conf=0.35`):** Adjusted person detection and tracker confidence from `0.40` to `0.35`, reliably bounding distant, partially occluded, and outdoor pedestrians.
+     - **Tripwire Visual Rendering:** Rendered both horizontal and vertical tripwire lines in high-visibility bright industrial yellow (`COLOR_TRIPWIRE = (0, 215, 255)`), providing clear optical confirmation of the active virtual tripwire barrier.
+  2. **Bidirectional Line-Crossing & Real-Time Dynamic Occupancy (`vision_engine.py` & `main.py`):**
+     - **Bidirectional Centroid Tracking:** Tracked person bounding box centroids `(center_x, center_y)` across frames using both `previous_y` and `previous_x`:
+       - Top-to-bottom crossing across `line_y`: Increments `ENTRY` (`down_count`).
+       - Bottom-to-top crossing across `line_y`: Increments `EXIT` (`up_count`).
+       - Left-to-right crossing across `line_x`: Increments `ENTRY` (`down_count`).
+       - Right-to-left crossing across `line_x`: Increments `EXIT` (`up_count`).
+     - **Untracked Centroid Fallback Matching:** For distant or intermittently tracked pedestrians (`tid is None`), implemented nearest-neighbor Euclidean distance centroid tracking to preserve line-crossing events.
+     - **Dynamic Occupancy Calculation:** Computed real-time net occupancy as `net_tripwire_occupancy = max(0, self.down_count - self.up_count)` and unified with zone polygon presence: `occupancy_count = max(occupancy_count, net_tripwire_occupancy)`.
+     - **Telemetry Endpoint Integration (`/api/camera-telemetry`):** Exposed live `entry`, `exit`, and `occupancy` values in the camera telemetry dictionary for all camera channels (reporting truthful zeros for offline streams and real-time counts for active streams).
+  3. **React Frontend Header & In-Tile Badges (`App.tsx`):**
+     - **CameraChannel Interface:** Added optional `entry`, `exit`, and `occupancy` fields.
+     - **Telemetry Polling (`fetchTelemetry`):** Mapped `entry`, `exit`, and `occupancy` from `/api/camera-telemetry` directly into reactive camera state.
+     - **Top Header Occupancy Badge:** Added real-time industrial telemetry badge in the top navigation bar displaying `OCCUPANCY: {totalOccupancy} | IN: {totalEntries} / OUT: {totalExits}` with pulsating status beacon.
+     - **In-Tile Header Badges:** Rendered camera-specific occupancy badges (`OCC: {cam.occupancy} (IN: {cam.entry} | OUT: {cam.exit})`) directly on active camera tile control bars.
+  4. **Verification & Testing:**
+     - Added comprehensive unit tests in `backend/tests/test_vision_engine.py`:
+       - `test_line_crossing_tripwire_top_to_bottom_and_bottom_to_top`: Verifies vertical line-crossing entry and exit increments.
+       - `test_line_crossing_tripwire_lateral_left_to_right_and_right_to_left`: Verifies lateral walkway entry and exit increments.
+       - `test_distant_pedestrian_conf_threshold`: Verifies pedestrians with confidence between 0.35 and 0.40 are bounded.
+       - `test_camera_telemetry_endpoint`: Verifies `entry`, `exit`, and `occupancy` are returned in `/api/camera-telemetry`.
+     - Executed full test suite: **67/67 tests passing** (100% pass rate).
+     - Verified frontend compilation: `npm run build` completed cleanly with zero TypeScript errors.
+     - Validated live FastAPI backend response: `/api/camera-telemetry` returns active telemetry counts.
+---
+
+#### 2026-10-24 17:48:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/app/main.py`, `backend/main.py`, `backend/app/core/websocket_manager.py`, `frontend/src/App.tsx`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `UPDATE`
+- **Summary:** Completely halted background execution and blocked phantom alerts on unassigned and offline camera streams:
+  1. **Strict Default Inactive State in WebSocket Circuit Breaker (`websocket_manager.py`):**
+     - Corrected `AlertConnectionManager.is_stream_active()` to default strictly to `False` (`self._stream_status.get(camera_id, False)`). Unassigned or unregistered streams are never presumed active.
+     - Enforced camera ID presence and active stream validation in both `broadcast()` and `broadcast_sync()`, dropping any payloads originating from offline or unassigned streams before queueing or socket transmission.
+  2. **Background Thread Halt on Unassigned / Standby Streams (`backend/app/main.py`):**
+     - **Active Client Gate:** In `FileStreamWorker._run()`, added guard `if self.active_clients <= 0:` that immediately pauses alert dispatch (`alert_manager.pause_stream_dispatch(self.camera_id)`), zeros FPS, sets `self.tracker.is_stream_active = False`, and idles the thread with `time.sleep(0.5)` without reading video frames or evaluating AI inference models.
+     - **Camera Stop Endpoint:** Implemented `POST /api/camera/{camera_id}/stop` endpoint. Whenever a stream is switched to `STANDBY` (Unassigned) in the React frontend, this endpoint immediately terminates the worker thread and pauses WebSocket alert permissions.
+  3. **Offline Stream Health Circuit Breakers (`main.py` & `vision_engine.py`):**
+     - In `FileStreamWorker._run()`: Missing file (`not self.file_path.exists()`), unopened capture (`not cap.isOpened()`), or read failure (`not ret or frame is None or frame.size == 0`) halts inference, pauses alert dispatch, and emits clean offline signal frame without calling YOLO pose, fire, or smoke models.
+     - In `CameraDeviceWorker._run()`: Unopened capture or device read error halts inference and skips all alert evaluations.
+     - In `SpatialTracker.process_frame()`: Strictly gated all alert triggers (Crowd, Fall, Fire, Smoke) on `self.is_stream_active and alert_manager.is_stream_active(self.camera_id)`.
+  4. **Verification & Testing:**
+     - Added comprehensive unit tests in `backend/tests/test_vision_engine.py`:
+       - `test_unassigned_camera_alerts_suppressed_by_default`: Verifies unassigned cameras default to inactive and alerts are suppressed.
+       - `test_stop_camera_stream_endpoint`: Verifies `POST /api/camera/{camera_id}/stop` terminates workers and pauses dispatches.
+       - `test_file_stream_worker_halts_when_unassigned`: Verifies workers with 0 clients halt execution.
+     - Full test suite verified: **70/70 tests passing** across `backend/tests/` (100% pass rate).
+     - Verified frontend build: `npm.cmd run build` passed with 0 errors.
+     - Verified live Uvicorn daemon with `http://127.0.0.1:8000/api/camera-telemetry` confirming zero ghost alerts fired.
+- **Technical Justification:** Eliminates orphan background thread execution and prevents phantom incident alerts from polluting the operational WebSocket queue when camera streams are unassigned, in standby, or offline.
+
+---
+
+#### 2026-10-24 17:58:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/app/fire_detector.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `UPDATE`
+- **Summary:** Calibrated fire and smoke detection thresholds and minimum contour size specifically for CAM-03 outdoor yard stream:
+  1. **CAM-03 Outdoor Yard Calibration (`vision_engine.py`):**
+     - In `SpatialTracker.__init__()`, specifically calibrated CAM-03 (`Logistics Yard North`):
+       - Raised fire confidence threshold to `fire_conf_threshold = 0.85` (from standard 0.50).
+       - Raised smoke confidence threshold to `smoke_conf_threshold = 0.85` (from standard 0.45).
+       - Required minimum contour size of `min_contour_size = 2000` px (from standard 500 px).
+       - Disabled diffuse smoke heuristic on CAM-03 (`enable_smoke_heuristic = False`) to prevent sunlight glare, exhaust heat shimmer, or low-contrast outdoor dust from triggering smoke alerts.
+       - Kept standard industrial channel thresholds untouched for all other cameras (CAM-04 precision machining, CAM-05 battery vault, CAM-06 industrial warehouse).
+  2. **Multi-Stage Contour Area & Confidence Guard (`vision_engine.py` & `fire_detector.py`):**
+     - In `SpatialTracker.process_frame()`: Implemented CAM-03 candidate post-filter verifying `b_conf >= 0.85` and `box_area >= 2000` px before evaluating hazard triggers.
+     - In `FireDetector.__init__()`: Supported `min_contour_size` alias and initialized `self.min_contour_area = 2000` for CAM-03.
+     - In `FireDetector.detect()`: Gated ML candidate bounding boxes and dense-smoke heuristic clusters with `(box_w * box_h) < self.min_contour_area` and `confidence < self.smoke_conf_threshold`.
+  3. **Verification & Testing:**
+     - Added comprehensive unit tests in `backend/tests/test_vision_engine.py`:
+       - `test_cam03_fire_conf_and_contour_size_configuration`: Verifies CAM-03 initializes with `conf=0.85` and `min_contour_size=2000` px while CAM-04/CAM-06 retain standard thresholds.
+       - `test_cam03_fire_false_trigger_rejection`: Verifies rejection of simulated vehicle headlight reflections (`conf=0.72 < 0.85`, box area 400 < 2000 px) and small vehicle glints (`conf=0.88`, box area 900 < 2000 px), while confirming genuine massive hazards (`conf=0.92 >= 0.85`, box area 3600 >= 2000 px) after temporal buffer.
+     - Ran full test suite: **72/72 tests passing** (100% pass rate).
+     - Verified frontend build: `npm run build` compiled cleanly with zero TypeScript errors.
+     - Relaunched Uvicorn daemon process (`task-4911`), validating live WebSocket alert stream suppression of outdoor false triggers.
+- **Technical Justification:** Eliminates false fire and smoke alarms triggered by normal outdoor lighting, reflections, sun glare, and vehicle headlights on CAM-03 without degrading sensitivity on indoor industrial hazard monitoring channels.
+
+---
+
+#### 2026-10-24 18:10:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `UPDATE`
+- **Summary:** Fixed Abnormal Gathering false trigger by strictly deriving real-time occupancy from active tracked bounding boxes:
+  1. **Decoupled Occupancy from Cumulative IN - OUT Counters (`vision_engine.py`):**
+     - Removed `net_tripwire_occupancy = max(0, self.down_count - self.up_count)` and `occupancy_count = max(occupancy_count, net_tripwire_occupancy)`.
+     - Cumulative line crossing counters (`self.down_count` for Entry and `self.up_count` for Exit) continue to record cumulative pedestrian traffic accurately, but no longer artificially inflate or latch `self.occupancy_count`.
+     - Real-time occupancy is now strictly calculated per frame from the *actual number of active, currently tracked bounding boxes* in the monitored zone.
+  2. **Gated ABNORMAL GATHERING Trigger on Instantaneous Active Count:**
+     - Enforced `is_crowded = (self.occupancy_count >= self.zone_threshold)`.
+     - An "ABNORMAL GATHERING" alert and visual boundary highlighting trigger only when the active number of tracked persons in the current frame reaches or exceeds the threshold.
+     - When people depart and active tracked occupancy drops below threshold, `is_crowded` returns to `False` immediately, eliminating phantom 15-second repeating alert cycles.
+  3. **Verification & Testing:**
+     - Added comprehensive unit test in `backend/tests/test_vision_engine.py`:
+       - `test_abnormal_gathering_does_not_trigger_from_cumulative_drift`: Simulates cumulative historical drift (12 entries, 2 exits; net = 10), verifies that a frame with only 2 active tracked persons returns `occupancy = 2`, `is_crowded = False`, and fires 0 alerts; verifies that a frame with 4 active persons returns `occupancy = 4`, `is_crowded = True`, and fires `ABNORMAL GATHERING`.
+     - Ran test suite: **73/73 tests passing** (100% pass rate).
+     - Verified frontend build: `npm run build` completed with 0 errors.
+     - Restarted Uvicorn daemon process (`task-5009`); confirmed live camera telemetry and alert queue are clean without false gathering alerts.
+- **Technical Justification:** Prevents cumulative sensor drift in bidirectional line-crossing counters from causing permanent false-positive crowd gathering alarms on high-throughput turnstiles and walkway corridors.
+
+---
+
+#### 2026-10-24 18:29:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `UPDATE`
+- **Summary:** Calibrated pedestrian detection confidence and abnormal gathering alert triggers specifically for CAM-03 wide/outdoor camera feed:
+  1. **Calibrated Person Detection Confidence on CAM-03 (`vision_engine.py`):**
+     - Configured `self.person_conf_threshold = 0.30` specifically for wide/outdoor feeds (`CAM-03`), allowing small, distant pedestrians across wide logistics yards to be accurately bounded.
+     - Preserved standard `conf=0.35` for indoor and entry feeds (e.g., CAM-01, CAM-02, CAM-04).
+     - Passed `self.person_conf_threshold` directly into `active_model.track()` and candidate bounding box filters.
+  2. **Abnormal Gathering Threshold Calibration & Red Warning Overlay (`vision_engine.py`):**
+     - Set default `self.zone_threshold = 8` for wide/outdoor yards (`CAM-03`), while retaining `zone_threshold = 4` for standard corridors and turnstiles.
+     - Evaluated active gathering on `active_crowd_count = max(occupancy_count, persons_count)`.
+     - When active count reaches or exceeds `zone_threshold` (8+ people on CAM-03):
+       - Draws red warning bounding box overlay (`color = (0, 0, 255)`, `thickness = 2`) around all detected people with `[CROWD]` badge.
+       - Dispatches `ABNORMAL GATHERING` alert payload to the WebSocket queue respecting the 15-second cooldown.
+  3. **Strict Model & Feature Isolation:**
+     - Left all fire and smoke detection modules completely untouched with surgical precision.
+  4. **Verification & Testing:**
+     - Added unit tests in `backend/tests/test_vision_engine.py`:
+       - `test_cam03_pedestrian_conf_threshold_030`: Confirms distant pedestrians with `conf=0.32` are bounded on CAM-03 while rejected on standard cameras.
+       - `test_cam03_abnormal_gathering_8_plus_people_red_overlay_and_alert`: Confirms 6 people on CAM-03 produce no alert; 8 active people trigger red warning bounding boxes and dispatch `ABNORMAL GATHERING` WebSocket alert.
+     - Ran pytest suite: **75/75 tests passing** (100% pass rate).
+     - Verified frontend build: `npm run build` compiled with 0 errors.
+     - Restarted Uvicorn daemon process (`task-5100`).
+- **Technical Justification:** Ensures reliable pedestrian bounding in wide-angle outdoor surveillance while providing clear red visual cues and WebSocket alerts for large crowd gatherings without regressing hazard detection.
+
+---
+
+#### 2026-10-24 18:38:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `UPDATE`
+- **Summary:** Calibrated universal human bounding box detection across all camera feeds and eliminated strict pixel area restrictions:
+  1. **Global Person Detection Threshold (`vision_engine.py`):**
+     - Lowered the person detection confidence threshold to `self.person_conf_threshold = 0.25` globally across all camera feeds (CAM-01 through CAM-08).
+     - Passed `self.person_conf_threshold` (0.25) into both `model.track()` and candidate bounding box loops.
+     - Distant, small, or low-contrast pedestrians in wide-angle/outdoor feeds are now reliably detected and assigned visible bounding boxes.
+  2. **Unrestricted Human Bounding Box Size:**
+     - Verified that human bounding box evaluation enforces no minimum pixel area filters (e.g. area < 500 or 2000 px), ensuring small distant figures (e.g. 15x35 px) are tracked and bounded.
+  3. **Strict Module Isolation:**
+     - Left all fire and smoke detection modules completely untouched with surgical precision.
+  4. **Verification & Testing:**
+     - Updated unit tests in `backend/tests/test_vision_engine.py`:
+       - `test_universal_human_bounding_box_conf_025`: Verifies `person_conf_threshold == 0.25` across all camera IDs, confirms detection of small 15x35 px pedestrians with `conf=0.26`, and verifies sub-threshold rejection (`conf=0.22`).
+     - Ran full test suite: **75/75 tests passing** (100% pass rate).
+     - Verified frontend build: `npm run build` compiled cleanly with 0 errors.
+     - Restarted Uvicorn daemon process (`task-5144`).
+- **Technical Justification:** Guarantees universal tracking visibility for pedestrians in distant and wide outdoor surveillance angles without regressing environmental hazard sensitivity.
+
+---
+
+#### 2026-10-24 19:05:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/app/fire_detector.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `UPDATE`
+- **Summary:** Hidden skeletal overlays from stream display, fixed bounding box coordinate alignment, and raised smoke/fire classification threshold to `conf=0.88`:
+  1. **Hidden Skeletal Overlays (`vision_engine.py`):**
+     - Added `draw_skeletons: bool = False` configuration parameter to `SpatialTracker.__init__()`.
+     - In `SpatialTracker.process_frame()`: Gated drawing skeleton limb lines (`cv2.line`) and keypoint circles (`cv2.circle`) with `if getattr(self, "draw_skeletons", False)`.
+     - Maintained full background pose estimation tensor processing (spine compression angle calculation, nose/hip tracking, multi-frame temporal buffer) for worker fall detection without visual red line clutter on the video stream.
+  2. **Bounding Box Alignment & Scaling Calibration (`vision_engine.py`):**
+     - Safely extracted `orig_shape` from inference results, resolving `scale_x = width / orig_w` and `scale_y = height / orig_h`.
+     - Calibrated all bounding box corners `(raw_x1, raw_y1, raw_x2, raw_y2)` with scale factors and clamped strictly within `[0, width - 1]` and `[0, height - 1]`, ensuring pixel-perfect alignment with tracked subjects without edge or coordinate offsets.
+     - Scaled person keypoints `person_kpts` proportionally when resolution scaling is present.
+  3. **Raised Smoke/Fire Threshold for Wet Pavement (`conf=0.88`):**
+     - Raised `fire_conf_threshold = 0.88` and `smoke_conf_threshold = 0.88` on CAM-03 outdoor logistics yard feed.
+     - Updated `SpatialTracker.process_frame()` to reject candidate hazard boxes with `b_conf < 0.88` or `box_area < 2000` px.
+     - In `FireDetector.__init__()`: Applied `conf_threshold` directly to `smoke_conf_threshold` without artificial 0.45 clamping.
+  4. **Verification & Testing:**
+     - Updated unit tests in `backend/tests/test_vision_engine.py`:
+       - `test_skeleton_drawing_limbs_and_joints`: Verifies that default `draw_skeletons=False` leaves video frame free of skeleton lines and dots while fall detection logic executes accurately in the background.
+       - `test_cam03_fire_conf_and_contour_size_configuration`: Verifies `conf=0.88` configuration on CAM-03.
+       - `test_cam03_fire_false_trigger_rejection`: Verifies rejection of wet pavement reflections (`conf=0.85 < 0.88`), small glints (`conf=0.89`, area 900 < 2000 px), and confirmation of massive genuine hazards (`conf=0.92`, area 3600 px).
+       - `test_bounding_box_scaling_and_alignment`: Verifies that bounding boxes scale and align precisely across differing resolution spaces.
+     - Ran test suite: **76/76 tests passing** (100% pass rate).
+     - Verified frontend build: `npm run build` compiled with 0 errors.
+     - Restarted Uvicorn daemon process (`task-5356`), confirming live feed stability and WebSocket alert queue responsiveness.
+- **Technical Justification:** Cleans up surveillance display by removing distracting skeleton overlays while keeping mission-critical fall detection active, ensures accurate bounding box registration on tracked subjects, and eliminates false smoke alarms caused by wet outdoor pavement reflections.
+
+---
+
+#### 2026-10-24 19:18:00
+- **File Path:** `backend/app/vision_engine.py`, `backend/tests/test_vision_engine.py`, `CHANGELOG_REPORT.md`
+- **Operation Type:** `UPDATE`
+- **Summary:** Adjusted crowd detection threshold to trigger ABNORMAL GATHERING only when 15 or more people are actively detected simultaneously:
+  1. **Abnormal Gathering Threshold Calibration (`vision_engine.py`):**
+     - Updated default `zone_threshold = 15` in `SpatialTracker.__init__()`.
+     - In `SpatialTracker.process_frame()`: `is_crowded = (active_crowd_count >= self.zone_threshold)`.
+     - ABNORMAL GATHERING WebSocket alerts, red polygon highlighting, and red warning bounding boxes only fire when 15 or more people are actively detected in the frame simultaneously.
+     - Detections with fewer than 15 people retain normal Emerald Green bounding boxes without triggering gathering alerts.
+     - Fire/smoke modules and background skeletal pose estimation remained untouched.
+  2. **Verification & Testing:**
+     - Updated unit test in `backend/tests/test_vision_engine.py`:
+       - `test_abnormal_gathering_15_plus_people_red_overlay_and_alert`: Verifies `zone_threshold == 15`, confirms 14 active people produce green bounding boxes with 0 alerts, and confirms 15 active people trigger red warning bounding boxes and dispatch the `ABNORMAL GATHERING` alert.
+     - Full test suite: **76/76 tests passing** (100% pass rate).
+     - Frontend production build: `npm run build` compiled cleanly with 0 errors.
+     - Restarted Uvicorn daemon process (`task-5410`).
+- **Technical Justification:** Calibrates crowd gathering sensitivity to prevent alerts on standard facility foot traffic, restricting critical notifications to high-density crowd concentrations of 15+ simultaneous subjects.
+
+
+
+
+
+
 
 
 
