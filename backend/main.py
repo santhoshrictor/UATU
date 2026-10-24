@@ -67,7 +67,9 @@ from backend.app.main import (
     generate_file_stream,
     get_camera_telemetry,
     stop_camera_stream,
+    detect_face_alignment,
 )
+from backend.app.biometric_registry import BiometricRegistry, biometric_registry
 from backend.app.access_engine import (
     AccessCorrelationEngine,
     access_engine,
@@ -94,6 +96,9 @@ __all__ = [
     "generate_file_stream",
     "get_camera_telemetry",
     "stop_camera_stream",
+    "detect_face_alignment",
+    "BiometricRegistry",
+    "biometric_registry",
     "AccessCorrelationEngine",
     "access_engine",
     "evaluate_entry_event",
@@ -105,4 +110,5 @@ __all__ = [
     "create_hazard_alert_payload",
     "dispatch_hazard_alert",
 ]
+
 

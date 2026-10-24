@@ -69,3 +69,66 @@ def test_enroll_api_success(tmp_path):
                 users_data = users_resp.json()
                 enrolled_ids = [u["employee_id"] for u in users_data.get("users", [])]
                 assert "EMP-GUI-001" in enrolled_ids
+
+
+def test_detect_face_alignment_no_face():
+    blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    _, buffer = cv2.imencode('.jpg', blank_frame)
+    jpeg_bytes = buffer.tobytes()
+
+    mock_worker = MagicMock()
+    mock_worker.get_latest_jpeg.return_value = jpeg_bytes
+
+    with patch("backend.app.main.multi_webcam_manager.get_worker", return_value=mock_worker):
+        with patch("backend.app.main.face_analysis_app.get", return_value=[]):
+            response = client.get("/api/detect-face/0")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["detected"] is False
+            assert data["aligned"] is False
+
+
+def test_detect_face_alignment_centered():
+    blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    _, buffer = cv2.imencode('.jpg', blank_frame)
+    jpeg_bytes = buffer.tobytes()
+
+    mock_worker = MagicMock()
+    mock_worker.get_latest_jpeg.return_value = jpeg_bytes
+
+    mock_face = MagicMock()
+    # Centered: guide center is (320, 230), size is 200x200
+    mock_face.bbox = np.array([220, 130, 420, 330])
+    mock_face.det_score = 0.95
+
+    with patch("backend.app.main.multi_webcam_manager.get_worker", return_value=mock_worker):
+        with patch("backend.app.main.face_analysis_app.get", return_value=[mock_face]):
+            response = client.get("/api/detect-face/0")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["detected"] is True
+            assert data["aligned"] is True
+            assert "Face aligned" in data["message"]
+
+
+def test_detect_face_alignment_off_center():
+    blank_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    _, buffer = cv2.imencode('.jpg', blank_frame)
+    jpeg_bytes = buffer.tobytes()
+
+    mock_worker = MagicMock()
+    mock_worker.get_latest_jpeg.return_value = jpeg_bytes
+
+    mock_face = MagicMock()
+    # Far corner: (10, 10, 110, 110)
+    mock_face.bbox = np.array([10, 10, 110, 110])
+    mock_face.det_score = 0.80
+
+    with patch("backend.app.main.multi_webcam_manager.get_worker", return_value=mock_worker):
+        with patch("backend.app.main.face_analysis_app.get", return_value=[mock_face]):
+            response = client.get("/api/detect-face/0")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["detected"] is True
+            assert data["aligned"] is False
+            assert "circle" in data["message"].lower() or "closer" in data["message"].lower()

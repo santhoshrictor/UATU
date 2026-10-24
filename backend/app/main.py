@@ -9,7 +9,7 @@ import pickle
 import sys
 import threading
 import time
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 import uuid
 
 import cv2
@@ -64,6 +64,9 @@ except Exception as e:
 UPLOADS_DIR = BACKEND_DIR / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 MOCK_DB_PATH = BACKEND_DIR / "mock_employee_db.pkl"
+from backend.app.biometric_registry import biometric_registry
+biometric_registry.db_path = MOCK_DB_PATH
+
 
 # -----------------------------------------------------------------------------
 # YOLOv8 Person Detection Initialization
@@ -149,6 +152,38 @@ def generate_offline_frame(
     return encoded.tobytes()
 
 
+def generate_clean_raw_offline_frame(
+    title: str = "UATU // STANDBY",
+    subtitle: str = "CLEAN RAW VIDEO STREAM",
+    width: int = 640,
+    height: int = 480,
+) -> bytes:
+    """Generates a clean raw standby frame with NO grid lines, crosshairs, border reticles, or target boxes."""
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    frame[:] = (23, 6, 2)
+    cv2.circle(frame, (35, height // 2 - 12), 7, (68, 68, 239), -1)
+    cv2.putText(
+        frame,
+        title,
+        (55, height // 2 - 5),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        (248, 250, 252),
+        2,
+    )
+    cv2.putText(
+        frame,
+        subtitle,
+        (55, height // 2 + 25),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        (148, 163, 184),
+        1,
+    )
+    _, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    return encoded.tobytes()
+
+
 # =============================================================================
 # SINGLETON THREADED WEBCAM MANAGER (DIRECTSHOW ON WINDOWS)
 # =============================================================================
@@ -203,6 +238,10 @@ class CameraDeviceWorker:
         self.current_jpeg: bytes = generate_offline_frame(
             f"UATU // DEV-{device_id} INITIALIZING",
             f"CONNECTING TO DIRECTSHOW DEVICE {device_id}...",
+        )
+        self.raw_jpeg: bytes = generate_clean_raw_offline_frame(
+            f"UATU // DEV-{device_id} STANDBY",
+            "CLEAN RAW VIDEO STREAM",
         )
         self.frame_lock = threading.Lock()
         self.worker_thread = None
@@ -260,8 +299,13 @@ class CameraDeviceWorker:
                     _, encoded = cv2.imencode(
                         ".jpg", offline_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
                     )
+                    clean_raw = generate_clean_raw_offline_frame(
+                        f"UATU // DEV-{self.device_id} STANDBY",
+                        "CLEAN RAW VIDEO STREAM",
+                    )
                     with self.frame_lock:
                         self.current_jpeg = encoded.tobytes()
+                        self.raw_jpeg = clean_raw
                     time.sleep(1.0)
                     continue
 
@@ -270,6 +314,13 @@ class CameraDeviceWorker:
                 consecutive_errors = 0
                 self.is_live = True
                 alert_manager.resume_stream_dispatch(self.camera_id)
+
+                # Capture pristine un-annotated copy with memory isolation (no geometric overlays)
+                raw_frame = frame.copy()
+                _, raw_encoded = cv2.imencode(
+                    ".jpg", raw_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80]
+                )
+                raw_bytes = raw_encoded.tobytes()
 
                 # Feature 1-4, 15-17 (ByteTrack, Tripwire, Occupancy HUD, Fall Detection) with Stream Health Guard
                 annotated_frame, counts = self.tracker.process_frame(frame, ret=ret)
@@ -284,6 +335,7 @@ class CameraDeviceWorker:
                     )
                     with self.frame_lock:
                         self.current_jpeg = encoded.tobytes()
+                        self.raw_jpeg = raw_bytes
                     time.sleep(0.033)
                     continue
 
@@ -360,6 +412,7 @@ class CameraDeviceWorker:
                 jpeg_bytes = encoded.tobytes()
                 with self.frame_lock:
                     self.current_jpeg = jpeg_bytes
+                    self.raw_jpeg = raw_bytes
                 time.sleep(0.033)  # ~30 FPS
             else:
                 alert_manager.pause_stream_dispatch(self.camera_id)
@@ -378,8 +431,13 @@ class CameraDeviceWorker:
                 _, encoded = cv2.imencode(
                     ".jpg", offline_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
                 )
+                clean_raw = generate_clean_raw_offline_frame(
+                    f"UATU // DEV-{self.device_id} RECONNECTING",
+                    "CLEAN RAW VIDEO STREAM",
+                )
                 with self.frame_lock:
                     self.current_jpeg = encoded.tobytes()
+                    self.raw_jpeg = clean_raw
                 time.sleep(0.1)
 
     def start(self):
@@ -390,8 +448,10 @@ class CameraDeviceWorker:
             )
             self.worker_thread.start()
 
-    def get_latest_jpeg(self) -> bytes:
+    def get_latest_jpeg(self, raw: bool = False) -> bytes:
         with self.frame_lock:
+            if raw and getattr(self, "raw_jpeg", None) is not None:
+                return self.raw_jpeg
             return self.current_jpeg
 
     def stop(self):
@@ -610,6 +670,9 @@ class FileStreamWorker:
         self.current_jpeg: bytes = generate_offline_frame(
             f"UATU // {self.camera_id} INITIALIZING", "BUFFERING VIDEO FRAMES..."
         )
+        self.raw_jpeg: bytes = generate_clean_raw_offline_frame(
+            f"UATU // {self.camera_id} STANDBY", "CLEAN RAW VIDEO STREAM"
+        )
         self.frame_lock = threading.Lock()
         self.worker_thread: Optional[threading.Thread] = None
         self.fps = 25.0
@@ -709,6 +772,13 @@ class FileStreamWorker:
                     # Stream is valid and active: resume alert dispatch permissions
                     alert_manager.resume_stream_dispatch(self.camera_id)
 
+                    # Capture pristine un-annotated copy with memory isolation (no geometric overlays)
+                    raw_frame = frame.copy()
+                    _, raw_encoded = cv2.imencode(
+                        ".jpg", raw_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80]
+                    )
+                    raw_bytes = raw_encoded.tobytes()
+
                     # Run AI Inference (ByteTrack, Tripwire, Fall Detection & Fire Detection) with Stream Health Guard
                     counts = {
                         "persons": 0,
@@ -737,6 +807,7 @@ class FileStreamWorker:
                         )
                         with self.frame_lock:
                             self.current_jpeg = encoded.tobytes()
+                            self.raw_jpeg = raw_bytes
                         time.sleep(0.05)
                         continue
 
@@ -801,6 +872,7 @@ class FileStreamWorker:
                     jpeg_bytes = encoded.tobytes()
                     with self.frame_lock:
                         self.current_jpeg = jpeg_bytes
+                        self.raw_jpeg = raw_bytes
 
                     t_proc = time.perf_counter() - t_start
                     sleep_dur = max(0.005, frame_delay - t_proc)
@@ -818,8 +890,10 @@ class FileStreamWorker:
             )
             self.worker_thread.start()
 
-    def get_latest_jpeg(self) -> bytes:
+    def get_latest_jpeg(self, raw: bool = False) -> bytes:
         with self.frame_lock:
+            if raw and getattr(self, "raw_jpeg", None) is not None:
+                return self.raw_jpeg
             return self.current_jpeg
 
     def stop(self):
@@ -888,6 +962,7 @@ async def generate_file_stream(
     overlay_label: str = "FEED",
     camera_id: str = "CAM-03",
     zone: str = "Zone 03 // Logistics Yard North",
+    raw: bool = False,
 ):
     """Streams from a threaded video file reader buffer at full frame rate without blocking."""
     worker = multi_file_stream_manager.get_worker(
@@ -900,7 +975,7 @@ async def generate_file_stream(
     frame_interval = 1.0 / max(10.0, worker.fps)
     try:
         while True:
-            frame_bytes = worker.get_latest_jpeg()
+            frame_bytes = worker.get_latest_jpeg(raw=raw)
             yield (
                 b"--frame\r\n"
                 b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
@@ -912,12 +987,12 @@ async def generate_file_stream(
         worker.remove_client()
 
 
-async def generate_parameterized_webcam_stream(device_id: int):
+async def generate_parameterized_webcam_stream(device_id: int, raw: bool = False):
     """Yields frames from the designated device worker at ~25-30 FPS."""
     worker = multi_webcam_manager.get_worker(device_id)
     try:
         while True:
-            frame_bytes = worker.get_latest_jpeg()
+            frame_bytes = worker.get_latest_jpeg(raw=raw)
             yield (
                 b"--frame\r\n"
                 b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
@@ -928,7 +1003,7 @@ async def generate_parameterized_webcam_stream(device_id: int):
 
 
 @app.get("/api/video-stream")
-def get_video_stream():
+def get_video_stream(raw: bool = False):
     """Camera 3 / Loop stream: loops test_video.mp4 continuously."""
     video_path = get_test_video_path()
     return StreamingResponse(
@@ -937,25 +1012,35 @@ def get_video_stream():
             overlay_label="UATU CAM-03 [TEST LOOP]",
             camera_id="CAM-03",
             zone="Zone 03 // Logistics Yard North",
+            raw=raw,
         ),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
 
 
 @app.get("/api/webcam-stream/{device_id}")
-def get_webcam_stream_by_device(device_id: int):
+def get_webcam_stream_by_device(device_id: int, raw: bool = False):
     """Streams from specified hardware camera device index (e.g. 0 for Iriun, 1 for laptop webcam, 2 for HD)."""
     return StreamingResponse(
-        generate_parameterized_webcam_stream(device_id),
+        generate_parameterized_webcam_stream(device_id, raw=raw),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
 
 
 @app.get("/api/webcam-stream")
-def get_webcam_stream(device_id: int = 0):
+def get_webcam_stream(device_id: int = 0, raw: bool = False):
     """Default webcam stream (defaults to device_id=0 to prioritize physical laptop camera)."""
     return StreamingResponse(
-        generate_parameterized_webcam_stream(device_id),
+        generate_parameterized_webcam_stream(device_id, raw=raw),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.get("/api/raw-webcam-stream/{device_id}")
+def get_raw_webcam_stream_by_device(device_id: int):
+    """Dedicated endpoint returning raw clean camera feed without overlays for enrollment viewfinder."""
+    return StreamingResponse(
+        generate_parameterized_webcam_stream(device_id, raw=True),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
 
@@ -1123,11 +1208,179 @@ def get_custom_stream(
     )
 
 
+@app.get("/api/detect-face/{device_id}")
+@app.get("/api/detect-face")
+def detect_face_alignment(device_id: int = 0):
+    """
+    Evaluates current live frame from specified camera device index.
+    Detects face presence, size, and geometry relative to the central circular alignment guide.
+    Returns alignment status (aligned: bool), bounding box, confidence, and positioning advice.
+    """
+    try:
+        worker = multi_webcam_manager.get_worker(device_id)
+        jpeg_bytes = worker.get_latest_jpeg(raw=True)
+        if not jpeg_bytes:
+            return {
+                "detected": False,
+                "aligned": False,
+                "confidence": 0.0,
+                "message": "Connecting to camera feed...",
+                "box": None,
+                "center": None,
+            }
+
+        nparr = np.frombuffer(jpeg_bytes, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if frame is None or frame.size == 0:
+            return {
+                "detected": False,
+                "aligned": False,
+                "confidence": 0.0,
+                "message": "Camera stream standby",
+                "box": None,
+                "center": None,
+            }
+
+        h, w = frame.shape[:2]
+        guide_cx = w * 0.50
+        guide_cy = h * 0.48
+        guide_rx = w * 0.22
+        guide_ry = h * 0.32
+
+        faces = []
+        if face_analysis_app is not None:
+            try:
+                faces = face_analysis_app.get(frame)
+            except Exception as e:
+                logger.debug(f"InsightFace detection error: {e}")
+
+        # Fallback to OpenCV Haar cascade if InsightFace didn't return faces
+        if not faces:
+            try:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+                cascade = cv2.CascadeClassifier(cascade_path)
+                rects = cascade.detectMultiScale(
+                    gray, scaleFactor=1.1, minNeighbors=4, minSize=(int(w * 0.10), int(h * 0.12))
+                )
+                for (rx, ry, rw, rh) in rects:
+                    class DummyFace:
+                        pass
+                    df = DummyFace()
+                    df.bbox = np.array([rx, ry, rx + rw, ry + rh], dtype=float)
+                    df.det_score = 0.85
+                    faces.append(df)
+            except Exception as e:
+                logger.debug(f"Haar fallback error: {e}")
+
+        if not faces:
+            return {
+                "detected": False,
+                "aligned": False,
+                "confidence": 0.0,
+                "message": "Position face inside the target circle",
+                "box": None,
+                "center": None,
+            }
+
+        # Select most prominent face
+        best_face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+        fx1, fy1, fx2, fy2 = [float(v) for v in best_face.bbox]
+        det_score = float(getattr(best_face, "det_score", 1.0))
+        face_w = fx2 - fx1
+        face_h = fy2 - fy1
+        face_cx = (fx1 + fx2) / 2.0
+        face_cy = (fy1 + fy2) / 2.0
+
+        min_w = w * 0.10
+        max_w = w * 0.65
+        min_h = h * 0.12
+        max_h = h * 0.75
+        is_size_ok = (min_w <= face_w <= max_w) and (min_h <= face_h <= max_h)
+
+        # Elliptical normalized distance to guide center
+        norm_dist = ((face_cx - guide_cx) / guide_rx) ** 2 + ((face_cy - guide_cy) / guide_ry) ** 2
+        is_centered = norm_dist <= 1.05
+
+        if is_size_ok and is_centered and det_score >= 0.40:
+            aligned = True
+            message = "Face aligned. Ready for biometric enrollment."
+        elif not is_centered:
+            aligned = False
+            message = "Center your face inside the target circle."
+        elif face_w < min_w or face_h < min_h:
+            aligned = False
+            message = "Move closer to the camera."
+        elif face_w > max_w or face_h > max_h:
+            aligned = False
+            message = "Step back slightly from the camera."
+        else:
+            aligned = False
+            message = "Position face inside the target area."
+
+        return {
+            "detected": True,
+            "aligned": aligned,
+            "confidence": round(det_score, 2),
+            "box": [round(fx1), round(fy1), round(fx2), round(fy2)],
+            "center": [round(face_cx), round(face_cy)],
+            "message": message,
+        }
+    except Exception as exc:
+        logger.debug(f"Face alignment endpoint error: {exc}")
+        return {
+            "detected": False,
+            "aligned": False,
+            "confidence": 0.0,
+            "message": "Analyzing optical frame...",
+            "box": None,
+            "center": None,
+        }
+
+
 class EnrollRequest(BaseModel):
     device_id: int = Field(default=0, description="Camera device index (e.g. 0 for Laptop Webcam, 1 for Mobile/Iriun Webcam)")
     employee_id: str = Field(..., description="Unique employee badge identifier (e.g. EMP-1001)")
     name: str = Field(..., description="Full personnel name")
     roll: str = Field(..., description="Roll number or departmental ID")
+
+
+def extract_face_biometrics(frame: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[Any], int]:
+    """
+    Unified Canonical Biometric Feature Extraction Pipeline:
+    Used identically across both enrollment (/api/enroll) and live verification (/api/verify-access).
+    1. Runs InsightFace buffalo_l FaceAnalysis (detection + 5-point landmark alignment + ArcFace recognition).
+    2. Identifies primary (largest) face by bounding box area.
+    3. Normalizes 512-d feature vector: unit_norm = raw_emb / ||raw_emb||.
+    Returns:
+        (normalized_512d_embedding, best_face_object, face_count)
+    """
+    if frame is None or frame.size == 0 or face_analysis_app is None:
+        return None, None, 0
+
+    try:
+        faces = face_analysis_app.get(frame)
+    except Exception as e:
+        logger.error(f"InsightFace FaceAnalysis extraction error: {e}")
+        return None, None, 0
+
+    if not faces:
+        return None, None, 0
+
+    # Select primary (largest) face by bounding box area
+    best_face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+    raw_emb = getattr(best_face, "embedding", None)
+    if raw_emb is None:
+        return None, best_face, len(faces)
+
+    vec = np.asarray(raw_emb, dtype=np.float32).flatten()
+    norm = float(np.linalg.norm(vec))
+    if norm > 0.0:
+        unit_emb = (vec / norm).astype(np.float32)
+    else:
+        unit_emb = vec.astype(np.float32)
+
+    return unit_emb, best_face, len(faces)
 
 
 @app.post("/api/enroll")
@@ -1146,9 +1399,11 @@ async def enroll_personnel(payload: EnrollRequest):
             detail="Fields 'employee_id', 'name', and 'roll' are required.",
         )
 
-    # 1. Grab current live frame from requested device worker
+    # 1. Grab current live clean un-annotated frame from requested device worker
     worker = multi_webcam_manager.get_worker(payload.device_id)
-    jpeg_bytes = worker.get_latest_jpeg()
+    jpeg_bytes = worker.get_latest_jpeg(raw=True)
+    if not jpeg_bytes:
+        jpeg_bytes = worker.get_latest_jpeg()
 
     if not jpeg_bytes:
         raise HTTPException(
@@ -1166,61 +1421,48 @@ async def enroll_personnel(payload: EnrollRequest):
             detail="Failed to decode live camera frame for biometric extraction.",
         )
 
-    # 3. Process frame with InsightFace FaceAnalysis
+    # 3. Process frame through unified feature extraction & normalization pipeline
     if face_analysis_app is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="InsightFace biometric model is not initialized on the server.",
         )
 
-    try:
-        faces = face_analysis_app.get(frame)
-    except Exception as e:
-        logger.error(f"Error executing face analysis on live frame: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Biometric extraction failed: {str(e)}",
-        )
+    normalized_embedding, best_face, face_count = extract_face_biometrics(frame)
 
-    if not faces:
+    # If no face detected on primary device, check alternate devices (e.g. device 1)
+    if normalized_embedding is None or face_count == 0:
+        for alt_dev in [1, 0, 2]:
+            if alt_dev != payload.device_id:
+                try:
+                    alt_worker = multi_webcam_manager.get_worker(alt_dev)
+                    alt_bytes = alt_worker.get_latest_jpeg(raw=True) or alt_worker.get_latest_jpeg()
+                    if alt_bytes:
+                        alt_frame = cv2.imdecode(np.frombuffer(alt_bytes, np.uint8), cv2.IMREAD_COLOR)
+                        if alt_frame is not None and alt_frame.size > 0:
+                            alt_emb, alt_best, alt_cnt = extract_face_biometrics(alt_frame)
+                            if alt_cnt > 0 and alt_emb is not None:
+                                normalized_embedding = alt_emb
+                                best_face = alt_best
+                                face_count = alt_cnt
+                                break
+                except Exception as ex:
+                    logger.debug(f"Alternate camera enrollment probe error: {ex}")
+
+    if normalized_embedding is None or face_count == 0:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={"error": "No face detected in frame"},
         )
 
-    # 4. Extract normalized 512-d embedding from primary (largest) face
-    best_face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-    raw_embedding = best_face.embedding  # 512-dimensional float32 vector
-    norm = np.linalg.norm(raw_embedding)
-    normalized_embedding = (raw_embedding / norm) if norm > 0 else raw_embedding
-
-    # 5. Persist to backend/mock_employee_db.pkl (preserving previous enrollments)
-    db_path = MOCK_DB_PATH
-    db: Dict[str, Any] = {}
-    if db_path.exists():
-        try:
-            with open(db_path, "rb") as f:
-                loaded = pickle.load(f)
-                if isinstance(loaded, dict):
-                    db = loaded
-        except Exception as e:
-            logger.warning(f"Could not load existing employee db: {e}. Starting fresh.")
-
-    db[employee_id] = {
-        "name": name,
-        "roll": roll,
-        "embedding": normalized_embedding,
-    }
-
-    try:
-        with open(db_path, "wb") as f:
-            pickle.dump(db, f)
-    except Exception as e:
-        logger.error(f"Failed to persist employee database: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to write to employee database: {str(e)}",
-        )
+    # 4. Persist to mock_employee_db.pkl and sync in-memory BiometricRegistry
+    biometric_registry.db_path = MOCK_DB_PATH
+    enroll_res = biometric_registry.enroll(
+        employee_id=employee_id,
+        name=name,
+        roll=roll,
+        embedding=normalized_embedding,
+    )
 
     face_confidence = float(getattr(best_face, "det_score", 0.95))
     logger.info(f"Enrolled {name} ({roll}) under {employee_id} via Device {payload.device_id}")
@@ -1232,27 +1474,17 @@ async def enroll_personnel(payload: EnrollRequest):
         "name": name,
         "roll": roll,
         "confidence": round(face_confidence * 100, 1),
-        "total_enrolled": len(db),
+        "total_enrolled": enroll_res["total_enrolled"],
     }
+
 
 
 @app.get("/api/enrolled-users")
 def get_enrolled_users():
     """Lists all enrolled personnel in mock_employee_db.pkl (omits raw vectors)."""
-    db_path = MOCK_DB_PATH
-    if not db_path.exists():
-        return {"users": [], "count": 0}
-
-    try:
-        with open(db_path, "rb") as f:
-            db = pickle.load(f)
-            users = [
-                {"employee_id": k, "name": v.get("name"), "roll": v.get("roll")}
-                for k, v in db.items()
-            ]
-            return {"users": users, "count": len(users)}
-    except Exception as e:
-        return {"users": [], "count": 0, "error": str(e)}
+    biometric_registry.db_path = MOCK_DB_PATH
+    users = biometric_registry.list_enrolled()
+    return {"users": users, "count": len(users)}
 
 
 class VerifyAccessRequest(BaseModel):
@@ -1263,16 +1495,17 @@ class VerifyAccessRequest(BaseModel):
 @app.post("/api/verify-access")
 async def verify_access(payload: VerifyAccessRequest):
     """
-    Live AI Verification loop:
-    1. Loads mock_employee_db.pkl. If employee_id is missing, returns 404 Not Found.
-    2. Grabs the live camera frame from multi_webcam_manager.get_worker(device_id).get_latest_jpeg().
-    3. AI Step 1 (YOLO): Runs yolo_model(frame) to count detections with class == 0 (person).
-    4. AI Step 2 (InsightFace): Runs face_analysis_app.get(frame). Computes Cosine Similarity against enrolled embedding.
-    5. Verdict Logic:
+    Live AI Biometric Verification & 1:N Recognition Retrieval Loop:
+    1. Loads/verifies against in-memory BiometricRegistry (backed by mock_employee_db.pkl).
+    2. Grabs the clean live camera frame from multi_webcam_manager.get_worker(device_id).get_latest_jpeg(raw=True).
+    3. AI Step 1 (YOLO): Runs yolo_model(frame) to count person detections (class == 0).
+    4. AI Step 2 (InsightFace ArcFace): Runs face_analysis_app.get(frame) to extract 512-d live facial embedding.
+    5. Vector Matching: Computes normalized cosine similarity against registered profiles via BiometricRegistry.
+    6. Verdict Logic:
        - If person count > 1: status = 'TAILGATING'
-       - Else if face similarity >= 0.50: status = 'AUTHORIZED'
+       - Else if face match >= 0.45: status = 'AUTHORIZED'
        - Else: status = 'MISMATCH'
-    6. Returns {"status": status, "match_score": match_score_pct, "person_count": person_count, "employee_name": db_name, ...}
+    7. Dispatches real-time identification event to alert_manager.broadcast_sync.
     """
     employee_id = payload.employee_id.strip()
     if not employee_id:
@@ -1281,38 +1514,33 @@ async def verify_access(payload: VerifyAccessRequest):
             content={"error": "Employee ID is required"},
         )
 
-    # 1. Load mock_employee_db.pkl
-    db_path = MOCK_DB_PATH
-    if not db_path.exists():
+    biometric_registry.db_path = MOCK_DB_PATH
+    biometric_registry._ensure_fresh()
+
+    # If database file does not exist at all, return 404
+    if not biometric_registry.db_path.exists():
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
             content={"error": "Employee database not found. Please enroll personnel first."},
         )
 
-    try:
-        with open(db_path, "rb") as f:
-            db = pickle.load(f)
-    except Exception as e:
-        logger.error(f"Failed to read employee db: {e}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": f"Failed to read employee database: {str(e)}"},
-        )
+    is_auto_mode = employee_id.upper() in ["AUTO", "DETECT", "SCAN", "ALL"]
 
-    if employee_id not in db:
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={"error": f"Employee ID '{employee_id}' not found in database"},
-        )
+    # Check if explicit employee was requested and exists
+    target_rec = None
+    if not is_auto_mode:
+        target_rec = biometric_registry.get_employee(employee_id)
+        if target_rec is None:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"error": f"Employee ID '{employee_id}' not found in database"},
+            )
 
-    employee_record = db[employee_id]
-    db_name = employee_record.get("name", "Unknown")
-    db_roll = employee_record.get("roll", "")
-    enrolled_emb = employee_record.get("embedding")
-
-    # 2. Grab live frame from camera worker
+    # 2. Grab live clean un-annotated frame from camera worker
     worker = multi_webcam_manager.get_worker(payload.device_id)
-    jpeg_bytes = worker.get_latest_jpeg()
+    jpeg_bytes = worker.get_latest_jpeg(raw=True)
+    if not jpeg_bytes:
+        jpeg_bytes = worker.get_latest_jpeg()
     if not jpeg_bytes:
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -1344,43 +1572,108 @@ async def verify_access(payload: VerifyAccessRequest):
     else:
         person_count = 1
 
-    # 4. AI Step 2 (InsightFace): Face embedding extraction & Cosine Similarity
+    # 4. AI Step 2 (InsightFace ArcFace): Face embedding extraction & Cosine Similarity
     similarity = 0.0
     faces_detected = 0
-    if face_analysis_app is not None:
-        try:
-            faces = face_analysis_app.get(frame)
-            faces_detected = len(faces)
-            if faces and enrolled_emb is not None:
-                # Find largest face
-                best_face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-                live_emb = best_face.embedding
-                live_norm = np.linalg.norm(live_emb)
-                live_normed = (live_emb / live_norm) if live_norm > 0 else live_emb
+    db_name = target_rec.get("name", "Unknown") if target_rec else "Unrecognized"
+    db_roll = target_rec.get("roll", "") if target_rec else ""
+    matched_id = target_rec.get("employee_id", employee_id) if target_rec else employee_id
+    is_authorized = False
+    detail_msg = ""
 
-                enrolled_norm = np.linalg.norm(enrolled_emb)
-                enrolled_normed = (enrolled_emb / enrolled_norm) if enrolled_norm > 0 else enrolled_emb
+    active_device_id = payload.device_id
+    normalized_embedding, best_face, faces_detected = extract_face_biometrics(frame)
 
-                cos_sim = float(np.dot(live_normed, enrolled_normed))
-                similarity = max(0.0, min(1.0, cos_sim))
-        except Exception as e:
-            logger.warning(f"InsightFace verification inference error: {e}")
+    # If no face detected on primary device, check alternate active devices (e.g. Device 1 if user is at laptop)
+    if faces_detected == 0 or normalized_embedding is None:
+        for alt_dev in [1, 0, 2]:
+            if alt_dev != payload.device_id:
+                try:
+                    alt_worker = multi_webcam_manager.get_worker(alt_dev)
+                    alt_bytes = alt_worker.get_latest_jpeg(raw=True) or alt_worker.get_latest_jpeg()
+                    if alt_bytes:
+                        alt_frame = cv2.imdecode(np.frombuffer(alt_bytes, np.uint8), cv2.IMREAD_COLOR)
+                        if alt_frame is not None and alt_frame.size > 0:
+                            alt_emb, alt_best, alt_cnt = extract_face_biometrics(alt_frame)
+                            if alt_cnt > 0 and alt_emb is not None:
+                                frame = alt_frame
+                                normalized_embedding = alt_emb
+                                best_face = alt_best
+                                faces_detected = alt_cnt
+                                active_device_id = alt_dev
+                                logger.info(f"Auto-switched biometric verification to active feed Device {alt_dev}")
+                                break
+                except Exception as ex:
+                    logger.debug(f"Alternate camera verification probe error: {ex}")
+
+    if faces_detected > 0 and normalized_embedding is not None:
+        # A visible face proves at least 1 person is present
+        if person_count == 0:
+            person_count = max(person_count, faces_detected)
+
+        # Biometric retrieval against in-memory registry using exact normalized embedding
+        retrieval_res = biometric_registry.verify_or_identify(
+            live_embedding=normalized_embedding,
+            employee_id=employee_id if not is_auto_mode else None,
+            threshold=0.45,
+        )
+
+        similarity = retrieval_res["raw_score"]
+        is_authorized = retrieval_res["is_authorized"]
+        db_name = retrieval_res["employee_name"]
+        db_roll = retrieval_res["roll"]
+        matched_id = retrieval_res["employee_id"]
+        detail_msg = retrieval_res["detail"]
+    else:
+        detail_msg = "No facial features acquired in frame. Position face inside camera view."
+
 
     # 5. Verdict Logic:
     # - If person count > 1: status = 'TAILGATING'
-    # - Else if face similarity >= 0.50: status = 'AUTHORIZED'
+    # - Else if is_authorized (face similarity >= 0.45): status = 'AUTHORIZED'
     # - Else: status = 'MISMATCH'
     if person_count > 1:
         verdict_status = "TAILGATING"
-    elif similarity >= 0.50:
+    elif is_authorized and similarity >= 0.45:
         verdict_status = "AUTHORIZED"
     else:
         verdict_status = "MISMATCH"
 
     match_score_pct = round(similarity * 100, 1)
 
+    # 6. Dispatch real-time WebSocket event for security logs & command center
+    event_type = (
+        "TAILGATING_VIOLATION" if verdict_status == "TAILGATING"
+        else ("PERSONNEL_IDENTIFIED" if verdict_status == "AUTHORIZED" else "BIOMETRIC_MISMATCH")
+    )
+    event_severity = (
+        "CRITICAL" if verdict_status == "TAILGATING"
+        else ("INFO" if verdict_status == "AUTHORIZED" else "WARNING")
+    )
+    event_payload = {
+        "id": f"EVT-AUTH-{uuid.uuid4().hex[:8].upper()}",
+        "timestamp": datetime.now(IST).strftime("%H:%M:%S IST"),
+        "zone": f"Zone 01 // Device {active_device_id}",
+        "type": event_type,
+        "severity": event_severity,
+        "message": f"Biometric Access [{verdict_status}]: {db_name} ({matched_id}) - {match_score_pct}% ArcFace match",
+        "camera_id": f"CAM-DEV-{active_device_id}",
+        "metadata": {
+            "status": verdict_status,
+            "match_score": match_score_pct,
+            "employee_id": matched_id,
+            "employee_name": db_name,
+            "person_count": person_count,
+            "faces_detected": faces_detected,
+        },
+    }
+    try:
+        alert_manager.broadcast_sync(event_payload)
+    except Exception as e:
+        logger.debug(f"Alert broadcast notification: {e}")
+
     logger.info(
-        f"Verified {employee_id} ({db_name}): status={verdict_status}, match_score={match_score_pct}%, person_count={person_count}"
+        f"Verified {matched_id} ({db_name}): status={verdict_status}, match_score={match_score_pct}%, person_count={person_count}"
     )
 
     return {
@@ -1390,10 +1683,12 @@ async def verify_access(payload: VerifyAccessRequest):
         "person_count": person_count,
         "faces_detected": faces_detected,
         "employee_name": db_name,
-        "employee_id": employee_id,
+        "employee_id": matched_id,
         "roll": db_roll,
-        "zone": f"Zone 01 // Device {payload.device_id}",
+        "zone": f"Zone 01 // Device {active_device_id}",
+        "detail": detail_msg,
         "timestamp": datetime.now(IST).strftime("%H:%M:%S IST"),
     }
+
 
 

@@ -143,24 +143,7 @@ def capture_and_enroll(
         display = frame.copy()
         h, w = display.shape[:2]
 
-        # Draw biometric viewfinder guides
-        cx, cy = w // 2, h // 2
-        box_w, box_h = int(w * 0.45), int(h * 0.6)
-        x1, y1 = cx - box_w // 2, cy - box_h // 2
-        x2, y2 = cx + box_w // 2, cy + box_h // 2
-
-        # Viewport target box
-        cv2.rectangle(display, (x1, y1), (x2, y2), (75, 85, 99), 1)
-        # Corner reticles
-        reticle_len = 20
-        cv2.line(display, (x1, y1), (x1 + reticle_len, y1), (16, 185, 129), 2)
-        cv2.line(display, (x1, y1), (x1, y1 + reticle_len), (16, 185, 129), 2)
-        cv2.line(display, (x2, y1), (x2 - reticle_len, y1), (16, 185, 129), 2)
-        cv2.line(display, (x2, y1), (x2, y1 + reticle_len), (16, 185, 129), 2)
-        cv2.line(display, (x1, y2), (x1 + reticle_len, y2), (16, 185, 129), 2)
-        cv2.line(display, (x1, y2), (x1, y2 - reticle_len), (16, 185, 129), 2)
-        cv2.line(display, (x2, y2), (x2 - reticle_len, y2), (16, 185, 129), 2)
-        cv2.line(display, (x2, y2), (x2, y2 - reticle_len), (16, 185, 129), 2)
+        # Clean raw video display without geometric overlays, target boxes, or reticles
 
         # HUD Top Banner
         cv2.rectangle(display, (0, 0), (w, 55), (15, 23, 42), -1)

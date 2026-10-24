@@ -307,22 +307,35 @@ class AccessCorrelationEngine:
                         }
                     )
 
-                    # Compute cosine similarity if enrolled profile vector is supplied
+                    # Compute cosine similarity against enrolled profile vector
                     if expected_face_vector is not None:
                         match_score = self.compute_cosine_similarity(
                             live_embedding, expected_face_vector
                         )
                     else:
-                        # Baseline match if no registered profile exists
-                        match_score = 0.0
+                        # Attempt biometric retrieval from in-memory registry
+                        try:
+                            from backend.app.biometric_registry import biometric_registry
+                            rec = biometric_registry.get_employee(scanned_rfid)
+                            if rec and "embedding" in rec:
+                                match_score = self.compute_cosine_similarity(
+                                    live_embedding, rec["embedding"]
+                                )
+                            else:
+                                best_rec, best_sim, _ = biometric_registry.find_best_match(live_embedding)
+                                match_score = best_sim if best_rec else 0.0
+                        except Exception as e:
+                            logger.debug(f"Biometric retrieval lookup in access_engine: {e}")
+                            match_score = 0.0
             except Exception as e:
                 logger.error(f"Error during InsightFace facial vector extraction: {e}")
                 match_score = 0.0
 
         # ---------------------------------------------------------------------
-        # STEP 3: Verdict Determination
+        # STEP 3: Verdict Determination (Calibrated ArcFace Threshold: 0.45)
         # ---------------------------------------------------------------------
-        status = "AUTHORIZED" if match_score >= 0.85 else "MISMATCH"
+        threshold = 0.45
+        status = "AUTHORIZED" if match_score >= threshold else "MISMATCH"
         match_score_pct = round(match_score * 100, 2)
 
         return {
@@ -335,7 +348,7 @@ class AccessCorrelationEngine:
                 f"Biometric verification successful: {match_score_pct}% cosine match against enrolled credential."
                 if status == "AUTHORIZED"
                 else (
-                    f"Facial verification mismatch: Live subject returned {match_score_pct}% match (threshold: 85%)."
+                    f"Facial verification mismatch: Live subject returned {match_score_pct}% match (threshold: {round(threshold * 100, 1)}%)."
                     if face_detected
                     else f"Facial acquisition failed: No visible face located in camera frame for badge ({scanned_rfid})."
                 )
@@ -343,6 +356,7 @@ class AccessCorrelationEngine:
             "execution_device": self.device_info,
             "simulated": False,
         }
+
 
     def _evaluate_simulated_event(
         self,
