@@ -341,7 +341,7 @@ class CameraDeviceWorker:
                 raw_bytes = raw_encoded.tobytes()
 
                 # Feature 1-4, 15-17 (ByteTrack, Tripwire, Occupancy HUD, Fall Detection) with Stream Health Guard
-                annotated_frame, counts = self.tracker.process_frame(frame, ret=ret)
+                annotated_frame, counts = self.tracker.process_frame(raw_frame.copy(), ret=ret)
                 self.current_fps = counts.get("fps", 30.0)
 
                 # Skip alert processing if stream health check failed or stream is inactive

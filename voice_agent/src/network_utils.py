@@ -27,5 +27,10 @@ def _force_ipv4_getaddrinfo(
 
 
 def enable_ipv4_preference() -> None:
-    """Enforce IPv4 address resolution globally for this Python process."""
+    """Enforce IPv4 address resolution globally and inject native Windows trust store."""
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+    except Exception:
+        pass
     socket.getaddrinfo = _force_ipv4_getaddrinfo

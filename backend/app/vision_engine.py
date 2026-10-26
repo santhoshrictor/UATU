@@ -810,8 +810,10 @@ class SpatialTracker:
             overlay = frame.copy()
 
             # Translucent Tripwire (Yellow counting line spanning active horizontal & vertical paths)
-            cv2.line(overlay, (0, line_y), (width, line_y), (0, 215, 255), 2)
-            cv2.line(overlay, (line_x, 0), (line_x, height), (0, 215, 255), 2)
+            # Omit tripwire lines on CAM-02 for clean and minimal presentation
+            if self.camera_id != "CAM-02":
+                cv2.line(overlay, (0, line_y), (width, line_y), (0, 215, 255), 2)
+                cv2.line(overlay, (line_x, 0), (line_x, height), (0, 215, 255), 2)
 
             # Single semi-transparent dark bar across top
             cv2.rectangle(overlay, (0, 0), (width, 36), (15, 23, 42), -1)
@@ -824,8 +826,9 @@ class SpatialTracker:
             cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
 
             # Crisp tripwire line (spans horizontal & vertical walkway paths)
-            cv2.line(frame, (0, line_y), (width, line_y), (0, 215, 255), 1)
-            cv2.line(frame, (line_x, 0), (line_x, height), (0, 215, 255), 1)
+            if self.camera_id != "CAM-02":
+                cv2.line(frame, (0, line_y), (width, line_y), (0, 215, 255), 1)
+                cv2.line(frame, (line_x, 0), (line_x, height), (0, 215, 255), 1)
 
             # If breached, render crisp red boundary and bold warning
             if is_crowded:
