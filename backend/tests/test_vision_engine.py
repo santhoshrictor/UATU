@@ -1859,6 +1859,71 @@ def test_bounding_box_scaling_and_alignment():
     assert annotated[360, 300, 1] > 200
 
 
+def test_infer_stride_frame_skipping():
+    """
+    Verifies that infer_stride=3 executes heavy YOLO tracking only on frame 0, 3, 6,
+    and skips inference on intermediate frames while reusing cached detections smoothly.
+    """
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    mock_person = MagicMock()
+    mock_person.cls = [MagicMock(item=lambda: 0)]
+    mock_person.conf = [MagicMock(item=lambda: 0.85)]
+    mock_person.xyxy = [np.array([100.0, 100.0, 200.0, 300.0])]
+    mock_person.id = MagicMock(item=lambda: 7)
+
+    mock_res = MagicMock(boxes=[mock_person], keypoints=None)
+    mock_model = MagicMock()
+    mock_model.track.return_value = [mock_res]
+
+    tracker = SpatialTracker(model=mock_model, infer_stride=3)
+
+    # Frame 0: Should trigger inference (model.track call count = 1)
+    _, counts_0 = tracker.process_frame(frame.copy(), ret=True)
+    assert counts_0["persons"] == 1
+    assert mock_model.track.call_count == 1
+
+    # Frame 1: Should skip inference (model.track call count remains 1, reuses cache)
+    _, counts_1 = tracker.process_frame(frame.copy(), ret=True)
+    assert counts_1["persons"] == 1
+    assert mock_model.track.call_count == 1
+
+    # Frame 2: Should skip inference (model.track call count remains 1, reuses cache)
+    _, counts_2 = tracker.process_frame(frame.copy(), ret=True)
+    assert counts_2["persons"] == 1
+    assert mock_model.track.call_count == 1
+
+    # Frame 3: Should trigger inference (model.track call count = 2)
+    _, counts_3 = tracker.process_frame(frame.copy(), ret=True)
+    assert counts_3["persons"] == 1
+    assert mock_model.track.call_count == 2
+
+
+def test_infer_stride_reset_clears_cache():
+    """Verifies that reset() purges frame counter and cached boxes."""
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    mock_person = MagicMock()
+    mock_person.cls = [MagicMock(item=lambda: 0)]
+    mock_person.conf = [MagicMock(item=lambda: 0.85)]
+    mock_person.xyxy = [np.array([100.0, 100.0, 200.0, 300.0])]
+    mock_person.id = MagicMock(item=lambda: 7)
+
+    mock_res = MagicMock(boxes=[mock_person], keypoints=None)
+    mock_model = MagicMock()
+    mock_model.track.return_value = [mock_res]
+
+    tracker = SpatialTracker(model=mock_model, infer_stride=2)
+    tracker.process_frame(frame.copy(), ret=True)
+    assert len(tracker.cached_parsed_boxes) > 0
+    assert tracker.frame_counter == 1
+
+    tracker.reset()
+    assert len(tracker.cached_parsed_boxes) == 0
+    assert tracker.frame_counter == 0
+
+
+
 
 
 

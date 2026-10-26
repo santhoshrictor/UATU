@@ -175,6 +175,19 @@ class SpatialTracker:
         self.fps_frame_count = 0
         self.current_fps = 0.0
 
+        # Multi-Camera Inference Optimization & Frame Skipping
+        if kwargs.get("infer_stride") is not None:
+            self.infer_stride = max(1, int(kwargs.get("infer_stride")))
+        else:
+            self.infer_stride = 1  # 1 = every frame (default for unit-tests/single-frame calls)
+        self.frame_counter = 0
+        self.cached_parsed_boxes = []
+        self.cached_persons_count = 0
+        self.cached_vehicles_count = 0
+        self.cached_occupancy_count = 0
+        self.cached_is_crowded = False
+        self.cached_fall_detected = False
+
     def generate_offline_signal_frame(
         self,
         width: int = 640,
@@ -291,6 +304,8 @@ class SpatialTracker:
             self.track_center_y.clear()
             self.track_history.clear()
             self.previous_y.clear()
+            self.cached_parsed_boxes.clear()
+            self.frame_counter = 0
             if self.fire_detector is not None:
                 self.fire_detector.reset()
 
@@ -340,392 +355,415 @@ class SpatialTracker:
             line_y = int(height * 0.55)
             line_x = int(width * 0.50)
 
-            # 1. Run Tracker (Using yolo11n-pose.pt) with calibrated person conf threshold
-            active_model = self.model
-            if active_model is not None:
-                if hasattr(active_model, "track") and callable(getattr(active_model, "track")):
-                    try:
-                        track_out = active_model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False, conf=self.person_conf_threshold)
-                    except TypeError:
-                        track_out = active_model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False)
-                    results = track_out[0] if isinstance(track_out, (list, tuple)) else track_out
-                else:
-                    try:
-                        call_out = active_model(frame, verbose=False, conf=self.person_conf_threshold)
-                    except TypeError:
-                        call_out = active_model(frame, verbose=False)
-                    results = call_out[0] if isinstance(call_out, (list, tuple)) else call_out
-            else:
-                results = None
+            # Multi-Camera Inference Optimization: frame-skipping
+            self.frame_counter += 1
+            should_infer = (
+                (self.infer_stride <= 1)
+                or ((self.frame_counter - 1) % self.infer_stride == 0)
+                or (not self.cached_parsed_boxes and self.model is not None)
+            )
 
-            parsed_boxes = []
-            if results is not None and getattr(results, "boxes", None) is not None:
-                boxes_obj = results.boxes
-                has_boxes = False
-                if isinstance(boxes_obj, list):
-                    has_boxes = len(boxes_obj) > 0
-                elif hasattr(boxes_obj, "xyxy") and hasattr(boxes_obj.xyxy, "__len__"):
-                    has_boxes = len(boxes_obj.xyxy) > 0
-                elif hasattr(boxes_obj, "__len__"):
-                    try:
-                        has_boxes = len(boxes_obj) > 0
-                    except TypeError:
-                        has_boxes = True
-                else:
-                    has_boxes = True
-
-                if has_boxes:
-                    if isinstance(boxes_obj, list):
-                        boxes = np.array([
-                            b.xyxy[0]
-                            if hasattr(b, "xyxy") and isinstance(b.xyxy, (list, tuple, np.ndarray))
-                            else getattr(b, "xyxy", [0, 0, 0, 0])
-                            for b in boxes_obj
-                        ])
-                        clss = np.array([
-                            b.cls[0].item()
-                            if hasattr(b, "cls") and hasattr(b.cls[0], "item")
-                            else getattr(b, "cls", 0)
-                            for b in boxes_obj
-                        ])
-                        confs = np.array([
-                            float(b.conf[0].item() if hasattr(b.conf[0], "item") else b.conf[0])
-                            if hasattr(b, "conf") and isinstance(b.conf, (list, tuple))
-                            else getattr(b, "conf", 1.0)
-                            for b in boxes_obj
-                        ])
-                        track_ids = [
-                            int(b.id.item())
-                            if hasattr(b, "id") and b.id is not None and hasattr(b.id, "item")
-                            else getattr(b, "id", None)
-                            for b in boxes_obj
-                        ]
-                    else:
-                        xyxy = boxes_obj.xyxy
-                        boxes = xyxy.cpu().numpy() if hasattr(xyxy, "cpu") else np.array(xyxy)
-                        cls_arr = boxes_obj.cls
-                        if hasattr(cls_arr, "cpu"):
-                            clss = cls_arr.cpu().numpy()
-                        elif isinstance(cls_arr, (list, tuple)):
-                            clss = [c.item() if hasattr(c, "item") and callable(c.item) else c for c in cls_arr]
-                        else:
-                            clss = np.array(cls_arr)
-
-                        conf_arr = getattr(boxes_obj, "conf", None)
-                        if conf_arr is not None:
-                            if hasattr(conf_arr, "cpu"):
-                                confs = conf_arr.cpu().numpy()
-                            elif isinstance(conf_arr, (list, tuple)):
-                                confs = [c.item() if hasattr(c, "item") and callable(c.item) else c for c in conf_arr]
-                            else:
-                                confs = np.array(conf_arr)
-                        else:
-                            confs = np.ones(len(boxes), dtype=np.float32)
-
-                        if getattr(boxes_obj, "id", None) is not None:
-                            id_arr = boxes_obj.id
-                            if hasattr(id_arr, "int"):
-                                id_arr = id_arr.int()
-                            if hasattr(id_arr, "cpu"):
-                                id_arr = id_arr.cpu()
-                            track_ids = id_arr.tolist() if hasattr(id_arr, "tolist") else list(id_arr)
-                        else:
-                            track_ids = [None] * len(boxes)
-
-                    # Safe Keypoint extraction (Pose model)
-                    has_keypoints = hasattr(results, "keypoints") and results.keypoints is not None
-                    if has_keypoints:
-                        kp_obj = results.keypoints
+            if should_infer:
+                # 1. Run Tracker (Using yolo11n-pose.pt) with calibrated person conf threshold
+                active_model = self.model
+                if active_model is not None:
+                    if hasattr(active_model, "track") and callable(getattr(active_model, "track")):
                         try:
-                            if hasattr(kp_obj, "data") and "Mock" not in type(kp_obj.data).__name__:
-                                data = kp_obj.data
-                                data_np = data.cpu().numpy() if hasattr(data, "cpu") else (data.numpy() if hasattr(data, "numpy") else np.array(data))
-                                kpts = data_np[:, :, :3] if data_np.shape[-1] >= 3 else data_np
-                            elif hasattr(kp_obj, "xy") and "Mock" not in type(kp_obj.xy).__name__:
-                                xy = kp_obj.xy
-                                xy_np = (
-                                    xy.cpu().numpy()
-                                    if hasattr(xy, "cpu")
-                                    else (xy.numpy() if hasattr(xy, "numpy") else np.array(xy))
-                                )
-                                conf_kp = getattr(kp_obj, "conf", None)
-                                if conf_kp is not None and "Mock" not in type(conf_kp).__name__:
-                                    c_np = conf_kp.cpu().numpy() if hasattr(conf_kp, "cpu") else (conf_kp.numpy() if hasattr(conf_kp, "numpy") else np.array(conf_kp))
-                                    if c_np.ndim == 2 and xy_np.ndim == 3 and c_np.shape[:2] == xy_np.shape[:2]:
-                                        kpts = np.dstack([xy_np, c_np[:, :, None]])
+                            track_out = active_model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False, conf=self.person_conf_threshold)
+                        except TypeError:
+                            track_out = active_model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False)
+                        results = track_out[0] if isinstance(track_out, (list, tuple)) else track_out
+                    else:
+                        try:
+                            call_out = active_model(frame, verbose=False, conf=self.person_conf_threshold)
+                        except TypeError:
+                            call_out = active_model(frame, verbose=False)
+                        results = call_out[0] if isinstance(call_out, (list, tuple)) else call_out
+                else:
+                    results = None
+
+                parsed_boxes = []
+                if results is not None and getattr(results, "boxes", None) is not None:
+                    boxes_obj = results.boxes
+                    has_boxes = False
+                    if isinstance(boxes_obj, list):
+                        has_boxes = len(boxes_obj) > 0
+                    elif hasattr(boxes_obj, "xyxy") and hasattr(boxes_obj.xyxy, "__len__"):
+                        has_boxes = len(boxes_obj.xyxy) > 0
+                    elif hasattr(boxes_obj, "__len__"):
+                        try:
+                            has_boxes = len(boxes_obj) > 0
+                        except TypeError:
+                            has_boxes = True
+                    else:
+                        has_boxes = True
+
+                    if has_boxes:
+                        if isinstance(boxes_obj, list):
+                            boxes = np.array([
+                                b.xyxy[0]
+                                if hasattr(b, "xyxy") and isinstance(b.xyxy, (list, tuple, np.ndarray))
+                                else getattr(b, "xyxy", [0, 0, 0, 0])
+                                for b in boxes_obj
+                            ])
+                            clss = np.array([
+                                b.cls[0].item()
+                                if hasattr(b, "cls") and hasattr(b.cls[0], "item")
+                                else getattr(b, "cls", 0)
+                                for b in boxes_obj
+                            ])
+                            confs = np.array([
+                                float(b.conf[0].item() if hasattr(b.conf[0], "item") else b.conf[0])
+                                if hasattr(b, "conf") and isinstance(b.conf, (list, tuple))
+                                else getattr(b, "conf", 1.0)
+                                for b in boxes_obj
+                            ])
+                            track_ids = [
+                                int(b.id.item())
+                                if hasattr(b, "id") and b.id is not None and hasattr(b.id, "item")
+                                else getattr(b, "id", None)
+                                for b in boxes_obj
+                            ]
+                        else:
+                            xyxy = boxes_obj.xyxy
+                            boxes = xyxy.cpu().numpy() if hasattr(xyxy, "cpu") else np.array(xyxy)
+                            cls_arr = boxes_obj.cls
+                            if hasattr(cls_arr, "cpu"):
+                                clss = cls_arr.cpu().numpy()
+                            elif isinstance(cls_arr, (list, tuple)):
+                                clss = [c.item() if hasattr(c, "item") and callable(c.item) else c for c in cls_arr]
+                            else:
+                                clss = np.array(cls_arr)
+
+                            conf_arr = getattr(boxes_obj, "conf", None)
+                            if conf_arr is not None:
+                                if hasattr(conf_arr, "cpu"):
+                                    confs = conf_arr.cpu().numpy()
+                                elif isinstance(conf_arr, (list, tuple)):
+                                    confs = [c.item() if hasattr(c, "item") and callable(c.item) else c for c in conf_arr]
+                                else:
+                                    confs = np.array(conf_arr)
+                            else:
+                                confs = np.ones(len(boxes), dtype=np.float32)
+
+                            if getattr(boxes_obj, "id", None) is not None:
+                                id_arr = boxes_obj.id
+                                if hasattr(id_arr, "int"):
+                                    id_arr = id_arr.int()
+                                if hasattr(id_arr, "cpu"):
+                                    id_arr = id_arr.cpu()
+                                track_ids = id_arr.tolist() if hasattr(id_arr, "tolist") else list(id_arr)
+                            else:
+                                track_ids = [None] * len(boxes)
+
+                        # Safe Keypoint extraction (Pose model)
+                        has_keypoints = hasattr(results, "keypoints") and results.keypoints is not None
+                        if has_keypoints:
+                            kp_obj = results.keypoints
+                            try:
+                                if hasattr(kp_obj, "data") and "Mock" not in type(kp_obj.data).__name__:
+                                    data = kp_obj.data
+                                    data_np = data.cpu().numpy() if hasattr(data, "cpu") else (data.numpy() if hasattr(data, "numpy") else np.array(data))
+                                    kpts = data_np[:, :, :3] if data_np.shape[-1] >= 3 else data_np
+                                elif hasattr(kp_obj, "xy") and "Mock" not in type(kp_obj.xy).__name__:
+                                    xy = kp_obj.xy
+                                    xy_np = (
+                                        xy.cpu().numpy()
+                                        if hasattr(xy, "cpu")
+                                        else (xy.numpy() if hasattr(xy, "numpy") else np.array(xy))
+                                    )
+                                    conf_kp = getattr(kp_obj, "conf", None)
+                                    if conf_kp is not None and "Mock" not in type(conf_kp).__name__:
+                                        c_np = conf_kp.cpu().numpy() if hasattr(conf_kp, "cpu") else (conf_kp.numpy() if hasattr(conf_kp, "numpy") else np.array(conf_kp))
+                                        if c_np.ndim == 2 and xy_np.ndim == 3 and c_np.shape[:2] == xy_np.shape[:2]:
+                                            kpts = np.dstack([xy_np, c_np[:, :, None]])
+                                        else:
+                                            kpts = xy_np
                                     else:
                                         kpts = xy_np
+                                elif isinstance(kp_obj, (list, tuple, np.ndarray)):
+                                    kpts = np.array(kp_obj)
                                 else:
-                                    kpts = xy_np
-                            elif isinstance(kp_obj, (list, tuple, np.ndarray)):
-                                kpts = np.array(kp_obj)
-                            else:
+                                    kpts = [None] * len(boxes)
+                            except Exception as e:
+                                logger.debug(f"Could not parse keypoints: {e}")
                                 kpts = [None] * len(boxes)
-                        except Exception as e:
-                            logger.debug(f"Could not parse keypoints: {e}")
-                            kpts = [None] * len(boxes)
-                    else:
-                        kpts = [None] * len(boxes)
-
-                    scale_x = 1.0
-                    scale_y = 1.0
-                    orig_shape = getattr(results, "orig_shape", None)
-                    if (
-                        orig_shape is not None
-                        and "Mock" not in type(orig_shape).__name__
-                        and hasattr(orig_shape, "__len__")
-                        and len(orig_shape) >= 2
-                    ):
-                        try:
-                            orig_h = float(orig_shape[0])
-                            orig_w = float(orig_shape[1])
-                            if orig_h > 0 and orig_w > 0:
-                                scale_x = width / orig_w
-                                scale_y = height / orig_h
-                        except (TypeError, ValueError):
-                            scale_x = 1.0
-                            scale_y = 1.0
-
-                    for i, (box, cls, conf, track_id) in enumerate(zip(boxes, clss, confs, track_ids)):
-                        conf_val = float(conf.item() if hasattr(conf, "item") else conf)
-                        if conf_val < self.person_conf_threshold:
-                            continue
-                        class_id = int(cls.item() if hasattr(cls, "item") else cls)
-
-                        # Precise scaling and coordinate offset calibration to align exactly with tracked subjects
-                        try:
-                            box_flat = np.array(box, dtype=float).flatten()
-                            raw_x1, raw_y1, raw_x2, raw_y2 = float(box_flat[0]), float(box_flat[1]), float(box_flat[2]), float(box_flat[3])
-                        except Exception:
-                            raw_coords = list(map(float, box))
-                            raw_x1, raw_y1, raw_x2, raw_y2 = raw_coords[0], raw_coords[1], raw_coords[2], raw_coords[3]
-
-                        if scale_x != 1.0 or scale_y != 1.0:
-                            x1 = int(round(raw_x1 * scale_x))
-                            y1 = int(round(raw_y1 * scale_y))
-                            x2 = int(round(raw_x2 * scale_x))
-                            y2 = int(round(raw_y2 * scale_y))
                         else:
-                            x1 = int(round(raw_x1))
-                            y1 = int(round(raw_y1))
-                            x2 = int(round(raw_x2))
-                            y2 = int(round(raw_y2))
+                            kpts = [None] * len(boxes)
 
-                        # Strict clamp within frame boundaries
-                        x1 = max(0, min(width - 1, x1))
-                        y1 = max(0, min(height - 1, y1))
-                        x2 = max(x1 + 1, min(width, x2))
-                        y2 = max(y1 + 1, min(height, y2))
-
-                        center_x = (x1 + x2) // 2
-                        center_y = (y1 + y2) // 2
-                        w = x2 - x1
-                        h = y2 - y1
-
-                        tid = None
-                        if track_id is not None:
+                        scale_x = 1.0
+                        scale_y = 1.0
+                        orig_shape = getattr(results, "orig_shape", None)
+                        if (
+                            orig_shape is not None
+                            and "Mock" not in type(orig_shape).__name__
+                            and hasattr(orig_shape, "__len__")
+                            and len(orig_shape) >= 2
+                        ):
                             try:
-                                tid = int(track_id.item() if hasattr(track_id, "item") else track_id)
+                                orig_h = float(orig_shape[0])
+                                orig_w = float(orig_shape[1])
+                                if orig_h > 0 and orig_w > 0:
+                                    scale_x = width / orig_w
+                                    scale_y = height / orig_h
+                            except (TypeError, ValueError):
+                                scale_x = 1.0
+                                scale_y = 1.0
+
+                        for i, (box, cls, conf, track_id) in enumerate(zip(boxes, clss, confs, track_ids)):
+                            conf_val = float(conf.item() if hasattr(conf, "item") else conf)
+                            if conf_val < self.person_conf_threshold:
+                                continue
+                            class_id = int(cls.item() if hasattr(cls, "item") else cls)
+
+                            # Precise scaling and coordinate offset calibration to align exactly with tracked subjects
+                            try:
+                                box_flat = np.array(box, dtype=float).flatten()
+                                raw_x1, raw_y1, raw_x2, raw_y2 = float(box_flat[0]), float(box_flat[1]), float(box_flat[2]), float(box_flat[3])
                             except Exception:
-                                tid = None
+                                raw_coords = list(map(float, box))
+                                raw_x1, raw_y1, raw_x2, raw_y2 = raw_coords[0], raw_coords[1], raw_coords[2], raw_coords[3]
 
-                        if class_id == 0:  # Person
-                            persons_count += 1
-                            feet_x = (x1 + x2) // 2
-                            feet_y = float(y2)
-                            if cv2.pointPolygonTest(self.zone_pts, (float(feet_x), float(feet_y)), False) >= 0:
-                                occupancy_count += 1
+                            if scale_x != 1.0 or scale_y != 1.0:
+                                x1 = int(round(raw_x1 * scale_x))
+                                y1 = int(round(raw_y1 * scale_y))
+                                x2 = int(round(raw_x2 * scale_x))
+                                y2 = int(round(raw_y2 * scale_y))
+                            else:
+                                x1 = int(round(raw_x1))
+                                y1 = int(round(raw_y1))
+                                x2 = int(round(raw_x2))
+                                y2 = int(round(raw_y2))
 
-                            # Feature 17: Fall Detection Guardrails
-                            # Guard 1 (Incomplete Body Guard): If bounding box touches bottom edge (desk webcam), disable fall detection entirely.
-                            # Guard 2 (Strict Trajectory Rule): Fall requires rapid downward center-y shift AND true horizontal orientation (w > h * 1.3).
-                            is_falling = False
-                            person_kpts = None
-                            fall_condition_met = False
+                            # Strict clamp within frame boundaries
+                            x1 = max(0, min(width - 1, x1))
+                            y1 = max(0, min(height - 1, y1))
+                            x2 = max(x1 + 1, min(width, x2))
+                            y2 = max(y1 + 1, min(height, y2))
 
-                            has_valid_pose = False
-                            nose_y = 0.0
-                            shoulder_y = 0.0
-                            hip_y = 0.0
+                            center_x = (x1 + x2) // 2
+                            center_y = (y1 + y2) // 2
+                            w = x2 - x1
+                            h = y2 - y1
 
-                            def check_kpt_conf(kp_entry, min_conf=0.3):
-                                if kp_entry is None or len(kp_entry) < 2:
-                                    return False
-                                y_val = float(kp_entry[1])
-                                if y_val <= 0:
-                                    return False
-                                if len(kp_entry) >= 3:
-                                    return float(kp_entry[2]) > min_conf
-                                return True
+                            tid = None
+                            if track_id is not None:
+                                try:
+                                    tid = int(track_id.item() if hasattr(track_id, "item") else track_id)
+                                except Exception:
+                                    tid = None
 
-                            if kpts is not None and i < len(kpts) and kpts[i] is not None:
-                                raw_p_kpts = kpts[i]
-                                if hasattr(raw_p_kpts, "cpu"):
-                                    raw_p_kpts = raw_p_kpts.cpu().numpy()
-                                p_arr = np.array(raw_p_kpts)
-                                if p_arr.ndim >= 2 and len(p_arr) >= 13:
-                                    if scale_x != 1.0 or scale_y != 1.0:
-                                        p_scaled = p_arr.copy()
-                                        p_scaled[:, 0] = p_scaled[:, 0] * scale_x
-                                        p_scaled[:, 1] = p_scaled[:, 1] * scale_y
-                                        person_kpts = p_scaled
-                                    else:
-                                        person_kpts = p_arr
-                                    if check_kpt_conf(person_kpts[0], 0.3):
-                                        nose_y = float(person_kpts[0][1])
+                            if class_id == 0:  # Person
+                                persons_count += 1
+                                feet_x = (x1 + x2) // 2
+                                feet_y = float(y2)
+                                if cv2.pointPolygonTest(self.zone_pts, (float(feet_x), float(feet_y)), False) >= 0:
+                                    occupancy_count += 1
 
-                                    valid_shoulders = [float(person_kpts[idx][1]) for idx in (5, 6) if check_kpt_conf(person_kpts[idx], 0.3)]
-                                    valid_hips = [float(person_kpts[idx][1]) for idx in (11, 12) if check_kpt_conf(person_kpts[idx], 0.3)]
-
-                                    if nose_y > 0 and len(valid_shoulders) > 0 and len(valid_hips) > 0:
-                                        shoulder_y = sum(valid_shoulders) / float(len(valid_shoulders))
-                                        hip_y = sum(valid_hips) / float(len(valid_hips))
-                                        has_valid_pose = True
-
-                            is_bottom_edge_cut = (y2 >= height - 15)
-
-                            if has_valid_pose and (nose_y < hip_y):
-                                # Upright pose (head above hips) - sitting or standing, never a fall
+                                # Feature 17: Fall Detection Guardrails
+                                # Guard 1 (Incomplete Body Guard): If bounding box touches bottom edge (desk webcam), disable fall detection entirely.
+                                # Guard 2 (Strict Trajectory Rule): Fall requires rapid downward center-y shift AND true horizontal orientation (w > h * 1.3).
+                                is_falling = False
+                                person_kpts = None
                                 fall_condition_met = False
-                                if tid is not None:
-                                    self.fall_counters[tid] = 0
-                                    self.fall_consecutive_frames[tid] = 0
-                                else:
-                                    self.untracked_fall_counter = 0
-                                    self.untracked_fall_consecutive = 0
-                            elif is_bottom_edge_cut:
-                                # Desk webcam guard: legs cut off at bottom of frame -> disable fall detection entirely
-                                fall_condition_met = False
-                                if tid is not None:
-                                    self.fall_counters[tid] = 0
-                                    self.fall_consecutive_frames[tid] = 0
-                                else:
-                                    self.untracked_fall_counter = 0
-                                    self.untracked_fall_consecutive = 0
-                            else:
-                                # Strict Trajectory Rule & True Horizontal Orientation (w > h * 1.3)
-                                is_true_horizontal = (w > h * 1.3)
-                                rapid_downward_shift = False
 
-                                if tid is not None:
-                                    if tid not in self.track_center_y:
-                                        self.track_center_y[tid] = []
-                                    y_hist = self.track_center_y[tid]
+                                has_valid_pose = False
+                                nose_y = 0.0
+                                shoulder_y = 0.0
+                                hip_y = 0.0
 
-                                    if len(y_hist) >= 1:
-                                        earliest_y = min(y_hist)
-                                        if (center_y - earliest_y) >= 20:
-                                            rapid_downward_shift = True
-                                    elif len(y_hist) == 0:
-                                        # First observation: allow if pose has head at/below hips or collapse
-                                        if has_valid_pose and (nose_y >= hip_y):
-                                            rapid_downward_shift = True
-                                        elif not has_valid_pose and is_true_horizontal:
-                                            rapid_downward_shift = True
+                                def check_kpt_conf(kp_entry, min_conf=0.3):
+                                    if kp_entry is None or len(kp_entry) < 2:
+                                        return False
+                                    y_val = float(kp_entry[1])
+                                    if y_val <= 0:
+                                        return False
+                                    if len(kp_entry) >= 3:
+                                        return float(kp_entry[2]) > min_conf
+                                    return True
 
-                                    # Preserve active confirmed falling sequence while still horizontal
-                                    if self.fall_counters.get(tid, 0) >= 1 and is_true_horizontal:
-                                        rapid_downward_shift = True
+                                if kpts is not None and i < len(kpts) and kpts[i] is not None:
+                                    raw_p_kpts = kpts[i]
+                                    if hasattr(raw_p_kpts, "cpu"):
+                                        raw_p_kpts = raw_p_kpts.cpu().numpy()
+                                    p_arr = np.array(raw_p_kpts)
+                                    if p_arr.ndim >= 2 and len(p_arr) >= 13:
+                                        if scale_x != 1.0 or scale_y != 1.0:
+                                            p_scaled = p_arr.copy()
+                                            p_scaled[:, 0] = p_scaled[:, 0] * scale_x
+                                            p_scaled[:, 1] = p_scaled[:, 1] * scale_y
+                                            person_kpts = p_scaled
+                                        else:
+                                            person_kpts = p_arr
+                                        if check_kpt_conf(person_kpts[0], 0.3):
+                                            nose_y = float(person_kpts[0][1])
 
-                                    y_hist.append(center_y)
-                                    if len(y_hist) > 20:
-                                        y_hist.pop(0)
-                                else:
-                                    if has_valid_pose:
-                                        rapid_downward_shift = (nose_y >= hip_y)
+                                        valid_shoulders = [float(person_kpts[idx][1]) for idx in (5, 6) if check_kpt_conf(person_kpts[idx], 0.3)]
+                                        valid_hips = [float(person_kpts[idx][1]) for idx in (11, 12) if check_kpt_conf(person_kpts[idx], 0.3)]
+
+                                        if nose_y > 0 and len(valid_shoulders) > 0 and len(valid_hips) > 0:
+                                            shoulder_y = sum(valid_shoulders) / float(len(valid_shoulders))
+                                            hip_y = sum(valid_hips) / float(len(valid_hips))
+                                            has_valid_pose = True
+
+                                is_bottom_edge_cut = (y2 >= height - 15)
+
+                                if has_valid_pose and (nose_y < hip_y):
+                                    # Upright pose (head above hips) - sitting or standing, never a fall
+                                    fall_condition_met = False
+                                    if tid is not None:
+                                        self.fall_counters[tid] = 0
+                                        self.fall_consecutive_frames[tid] = 0
                                     else:
-                                        rapid_downward_shift = is_true_horizontal
+                                        self.untracked_fall_counter = 0
+                                        self.untracked_fall_consecutive = 0
+                                elif is_bottom_edge_cut:
+                                    # Desk webcam guard: legs cut off at bottom of frame -> disable fall detection entirely
+                                    fall_condition_met = False
+                                    if tid is not None:
+                                        self.fall_counters[tid] = 0
+                                        self.fall_consecutive_frames[tid] = 0
+                                    else:
+                                        self.untracked_fall_counter = 0
+                                        self.untracked_fall_consecutive = 0
+                                else:
+                                    # Strict Trajectory Rule & True Horizontal Orientation (w > h * 1.3)
+                                    is_true_horizontal = (w > h * 1.3)
+                                    rapid_downward_shift = False
 
-                                # Trigger fall only when both true horizontal and rapid downward drop are present
-                                fall_condition_met = is_true_horizontal and rapid_downward_shift
+                                    if tid is not None:
+                                        if tid not in self.track_center_y:
+                                            self.track_center_y[tid] = []
+                                        y_hist = self.track_center_y[tid]
 
-                            # Temporal Frame Buffer: persist for at least 5 consecutive frames
-                            if fall_condition_met:
+                                        if len(y_hist) >= 1:
+                                            earliest_y = min(y_hist)
+                                            if (center_y - earliest_y) >= 20:
+                                                rapid_downward_shift = True
+                                        elif len(y_hist) == 0:
+                                            # First observation: allow if pose has head at/below hips or collapse
+                                            if has_valid_pose and (nose_y >= hip_y):
+                                                rapid_downward_shift = True
+                                            elif not has_valid_pose and is_true_horizontal:
+                                                rapid_downward_shift = True
+
+                                        # Preserve active confirmed falling sequence while still horizontal
+                                        if self.fall_counters.get(tid, 0) >= 1 and is_true_horizontal:
+                                            rapid_downward_shift = True
+
+                                        y_hist.append(center_y)
+                                        if len(y_hist) > 20:
+                                            y_hist.pop(0)
+                                    else:
+                                        if has_valid_pose:
+                                            rapid_downward_shift = (nose_y >= hip_y)
+                                        else:
+                                            rapid_downward_shift = is_true_horizontal
+
+                                    # Trigger fall only when both true horizontal and rapid downward drop are present
+                                    fall_condition_met = is_true_horizontal and rapid_downward_shift
+
+                                # Temporal Frame Buffer: persist for at least 5 consecutive frames
+                                if fall_condition_met:
+                                    if tid is not None:
+                                        curr_frames = self.fall_counters.get(tid, 0) + 1
+                                        self.fall_counters[tid] = curr_frames
+                                        self.fall_consecutive_frames[tid] = curr_frames
+                                    else:
+                                        self.untracked_fall_counter += 1
+                                        self.untracked_fall_consecutive = self.untracked_fall_counter
+                                        curr_frames = self.untracked_fall_counter
+                                else:
+                                    if tid is not None:
+                                        self.fall_counters[tid] = 0
+                                        self.fall_consecutive_frames[tid] = 0
+                                    else:
+                                        self.untracked_fall_counter = 0
+                                        self.untracked_fall_consecutive = 0
+                                    curr_frames = 0
+
+                                if curr_frames >= self.fall_confirmation_threshold:
+                                    is_falling = True
+
+                                if is_falling:
+                                    fall_detected = True
+
+                                # Track ID & Line-Crossing Math (Bidirectional: Horizontal Y & Vertical X)
+                                old_y = None
+                                old_x = None
+
                                 if tid is not None:
-                                    curr_frames = self.fall_counters.get(tid, 0) + 1
-                                    self.fall_counters[tid] = curr_frames
-                                    self.fall_consecutive_frames[tid] = curr_frames
+                                    old_y = self.previous_y.get(tid)
+                                    old_x = self.previous_x.get(tid)
+                                    self.previous_y[tid] = center_y
+                                    self.previous_x[tid] = center_x
                                 else:
-                                    self.untracked_fall_counter += 1
-                                    self.untracked_fall_consecutive = self.untracked_fall_counter
-                                    curr_frames = self.untracked_fall_counter
-                            else:
-                                if tid is not None:
-                                    self.fall_counters[tid] = 0
-                                    self.fall_consecutive_frames[tid] = 0
-                                else:
-                                    self.untracked_fall_counter = 0
-                                    self.untracked_fall_consecutive = 0
-                                curr_frames = 0
+                                    # Fallback spatial centroid matching for untracked pedestrians (distant or intermittent)
+                                    best_idx = -1
+                                    min_dist = 80.0
+                                    for c_idx, (ux, uy, utime) in enumerate(self.untracked_centroids):
+                                        dist = np.hypot(center_x - ux, center_y - uy)
+                                        if dist < min_dist:
+                                            min_dist = dist
+                                            best_idx = c_idx
+                                    if best_idx >= 0:
+                                        old_x, old_y, _ = self.untracked_centroids[best_idx]
+                                        self.untracked_centroids[best_idx] = (center_x, center_y, time.time())
+                                    else:
+                                        self.untracked_centroids.append((center_x, center_y, time.time()))
+                                        if len(self.untracked_centroids) > 25:
+                                            self.untracked_centroids.pop(0)
 
-                            if curr_frames >= self.fall_confirmation_threshold:
-                                is_falling = True
+                                # Evaluate virtual line-crossing vector (top-to-bottom OR left-to-right)
+                                crossed_entry = False
+                                crossed_exit = False
 
-                            if is_falling:
-                                fall_detected = True
+                                # 1. Vertical crossing across horizontal line (Top-to-Bottom = Entry, Bottom-to-Top = Exit)
+                                if old_y is not None:
+                                    if old_y < line_y <= center_y:
+                                        crossed_entry = True
+                                    elif old_y > line_y >= center_y:
+                                        crossed_exit = True
 
-                            # Track ID & Line-Crossing Math (Bidirectional: Horizontal Y & Vertical X)
-                            old_y = None
-                            old_x = None
+                                # 2. Horizontal crossing across vertical line (Left-to-Right = Entry, Right-to-Left = Exit)
+                                if not crossed_entry and not crossed_exit and old_x is not None:
+                                    if old_x < line_x <= center_x:
+                                        crossed_entry = True
+                                    elif old_x > line_x >= center_x:
+                                        crossed_exit = True
 
-                            if tid is not None:
-                                old_y = self.previous_y.get(tid)
-                                old_x = self.previous_x.get(tid)
-                                self.previous_y[tid] = center_y
-                                self.previous_x[tid] = center_x
-                            else:
-                                # Fallback spatial centroid matching for untracked pedestrians (distant or intermittent)
-                                best_idx = -1
-                                min_dist = 80.0
-                                for c_idx, (ux, uy, utime) in enumerate(self.untracked_centroids):
-                                    dist = np.hypot(center_x - ux, center_y - uy)
-                                    if dist < min_dist:
-                                        min_dist = dist
-                                        best_idx = c_idx
-                                if best_idx >= 0:
-                                    old_x, old_y, _ = self.untracked_centroids[best_idx]
-                                    self.untracked_centroids[best_idx] = (center_x, center_y, time.time())
-                                else:
-                                    self.untracked_centroids.append((center_x, center_y, time.time()))
-                                    if len(self.untracked_centroids) > 25:
-                                        self.untracked_centroids.pop(0)
+                                if crossed_entry:
+                                    self.down_count += 1
+                                    self.entry_count = self.down_count
+                                elif crossed_exit:
+                                    self.up_count += 1
+                                    self.exit_count = self.up_count
 
-                            # Evaluate virtual line-crossing vector (top-to-bottom OR left-to-right)
-                            crossed_entry = False
-                            crossed_exit = False
+                                parsed_boxes.append((x1, y1, x2, y2, center_y, True, tid, is_falling, person_kpts))
+                            elif class_id in [2, 3, 5, 7]:  # Vehicles
+                                vehicles_count += 1
+                                parsed_boxes.append((x1, y1, x2, y2, center_y, False, None, False, None))
 
-                            # 1. Vertical crossing across horizontal line (Top-to-Bottom = Entry, Bottom-to-Top = Exit)
-                            if old_y is not None:
-                                if old_y < line_y <= center_y:
-                                    crossed_entry = True
-                                elif old_y > line_y >= center_y:
-                                    crossed_exit = True
+                # Real-Time Occupancy & Crowd Calculation:
+                # Active people count in the monitored zone / frame
+                active_crowd_count = max(occupancy_count, persons_count)
+                is_crowded = (occupancy_count >= self.zone_threshold) or (active_crowd_count >= self.zone_threshold)
+                self.occupancy_count = active_crowd_count if is_crowded else occupancy_count
+                occupancy_count = self.occupancy_count
 
-                            # 2. Horizontal crossing across vertical line (Left-to-Right = Entry, Right-to-Left = Exit)
-                            if not crossed_entry and not crossed_exit and old_x is not None:
-                                if old_x < line_x <= center_x:
-                                    crossed_entry = True
-                                elif old_x > line_x >= center_x:
-                                    crossed_exit = True
-
-                            if crossed_entry:
-                                self.down_count += 1
-                                self.entry_count = self.down_count
-                            elif crossed_exit:
-                                self.up_count += 1
-                                self.exit_count = self.up_count
-
-                            parsed_boxes.append((x1, y1, x2, y2, center_y, True, tid, is_falling, person_kpts))
-                        elif class_id in [2, 3, 5, 7]:  # Vehicles
-                            vehicles_count += 1
-                            parsed_boxes.append((x1, y1, x2, y2, center_y, False, None, False, None))
-
-            # Real-Time Occupancy & Crowd Calculation:
-            # Active people count in the monitored zone / frame
-            active_crowd_count = max(occupancy_count, persons_count)
-            is_crowded = (occupancy_count >= self.zone_threshold) or (active_crowd_count >= self.zone_threshold)
-            self.occupancy_count = active_crowd_count if is_crowded else occupancy_count
-            occupancy_count = self.occupancy_count
+                self.cached_parsed_boxes = list(parsed_boxes)
+                self.cached_persons_count = persons_count
+                self.cached_vehicles_count = vehicles_count
+                self.cached_occupancy_count = occupancy_count
+                self.cached_is_crowded = is_crowded
+                self.cached_fall_detected = fall_detected
+            else:
+                parsed_boxes = list(self.cached_parsed_boxes)
+                persons_count = self.cached_persons_count
+                vehicles_count = self.cached_vehicles_count
+                occupancy_count = self.cached_occupancy_count
+                is_crowded = self.cached_is_crowded
+                fall_detected = self.cached_fall_detected
 
             # 2. Contextual UI & Alpha-Blended Overlays
             overlay = frame.copy()
@@ -1026,5 +1064,12 @@ class SpatialTracker:
         self.fall_consecutive_frames.clear()
         self.untracked_fall_counter = 0
         self.untracked_fall_consecutive = 0
+        self.cached_parsed_boxes.clear()
+        self.frame_counter = 0
+        self.cached_persons_count = 0
+        self.cached_vehicles_count = 0
+        self.cached_occupancy_count = 0
+        self.cached_is_crowded = False
+        self.cached_fall_detected = False
 
 
