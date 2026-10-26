@@ -425,7 +425,19 @@ class FortressEngine:
             session = self._authorized_sessions.get(clean_token)
             if not session:
                 return False, None
-            if time.time() > session.get("expires_at", 0):
+            exp = session.get("expires_at", 0)
+            if isinstance(exp, str):
+                try:
+                    exp_val = datetime.fromisoformat(exp).timestamp()
+                except Exception:
+                    exp_val = 0.0
+            else:
+                try:
+                    exp_val = float(exp)
+                except Exception:
+                    exp_val = 0.0
+
+            if time.time() > exp_val:
                 self._authorized_sessions.pop(clean_token, None)
                 return False, None
             return True, session
