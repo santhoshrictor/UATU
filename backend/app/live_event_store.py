@@ -203,6 +203,20 @@ class LiveEventStore:
         logger.info(
             f"Recorded LIVE EVENT: [{event_record['event_id']}] {event_type} on {camera_id} ({zone})"
         )
+
+        try:
+            from backend.app.audit_engine import audit_engine
+            audit_engine.log_event(
+                event_type=event_type,
+                camera_node=camera_id,
+                zone=zone,
+                details=detail,
+                payload=event_record,
+                operator_id="System",
+            )
+        except Exception as e:
+            logger.debug(f"Audit log trigger note: {e}")
+
         return event_record
 
     def get_live_events(
@@ -262,6 +276,18 @@ class LiveEventStore:
                 logger.info(
                     f"Acknowledged LIVE EVENT [{event_id}] by {acknowledged_by} at {now_str}."
                 )
+                try:
+                    from backend.app.audit_engine import audit_engine
+                    audit_engine.log_event(
+                        event_type="SYSTEM_ACTION: ACKNOWLEDGE_ALERT",
+                        camera_node=target.get("camera_id", "N/A"),
+                        zone=target.get("zone", "N/A"),
+                        details=f"Alert [{event_id}] acknowledged by {acknowledged_by}.",
+                        operator_id=acknowledged_by,
+                        payload={"event_id": event_id, "acknowledged_by": acknowledged_by},
+                    )
+                except Exception:
+                    pass
                 return target
             return None
 
@@ -271,7 +297,17 @@ class LiveEventStore:
             self._events = []
             self._persist_to_disk()
             logger.info("Cleared all records from LiveEventStore.")
+            try:
+                from backend.app.audit_engine import audit_engine
+                audit_engine.log_event(
+                    event_type="SYSTEM_ACTION: CLEAR_ALERTS",
+                    details="Operator cleared active incident dispatch queue.",
+                    operator_id="Operator",
+                )
+            except Exception:
+                pass
             return True
+
 
 
 # Global Singleton instance

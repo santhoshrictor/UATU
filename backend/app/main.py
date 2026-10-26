@@ -35,6 +35,7 @@ from backend.app.api.v1.api import api_router
 from backend.app.core.config import settings
 from backend.app.core.logging import logger
 from backend.app.core.websocket_manager import alert_manager
+from backend.app.audit_engine import audit_engine
 from backend.app.live_event_store import live_event_store
 from backend.app.vision_engine import SpatialTracker
 
@@ -985,6 +986,72 @@ async def get_snapshot(filename: str):
             detail=f"Snapshot '{safe_name}' not found.",
         )
     return FileResponse(file_path, media_type="image/jpeg")
+
+
+class AuditLogCreateRequest(BaseModel):
+    event_type: str = Field(..., description="Type of event or command")
+    camera_node: Optional[str] = Field("N/A", description="Camera ID or node")
+    zone: Optional[str] = Field("N/A", description="Associated zone")
+    details: Optional[str] = Field("", description="Detailed description")
+    voice_command: Optional[str] = Field("", description="Voice command if applicable")
+    agent_response: Optional[str] = Field("", description="AI agent response if applicable")
+    operator_id: Optional[str] = Field("Operator", description="Operator or subsystem identity")
+    payload: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Metadata payload")
+
+
+@app.get("/api/audit-logs/export")
+async def export_audit_logs(date: Optional[str] = None):
+    """
+    Export audit logs for a specific date (YYYY-MM-DD) as a downloadable CSV.
+    """
+    import io
+    target_date = date.strip() if date and date.strip() else datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
+    csv_content = audit_engine.export_csv_for_date(target_date)
+    filename = f"audit_log_{target_date}.csv"
+    return StreamingResponse(
+        io.StringIO(csv_content),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/audit-logs")
+async def get_audit_logs(date: Optional[str] = None):
+    """
+    Retrieve audit logs for a specific date (YYYY-MM-DD) along with available dates list.
+    """
+    target_date = date.strip() if date and date.strip() else datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
+    logs = audit_engine.get_logs_for_date(target_date)
+    available_dates = audit_engine.get_available_dates()
+    return {
+        "status": "success",
+        "date": target_date,
+        "count": len(logs),
+        "available_dates": available_dates,
+        "logs": logs,
+    }
+
+
+@app.post("/api/audit-logs")
+async def create_audit_log(payload: AuditLogCreateRequest):
+    """
+    Record an explicit audit entry into the date-wise audit log.
+    """
+    record = audit_engine.log_event(
+        event_type=payload.event_type,
+        camera_node=payload.camera_node or "N/A",
+        zone=payload.zone or "N/A",
+        details=payload.details or "",
+        voice_command=payload.voice_command or "",
+        agent_response=payload.agent_response or "",
+        operator_id=payload.operator_id or "Operator",
+        payload=payload.payload or {},
+    )
+    return {
+        "status": "success",
+        "record": record,
+    }
+
 
 
 # Mount API v1 router

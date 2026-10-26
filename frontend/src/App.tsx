@@ -22,6 +22,7 @@ import {
   Plus,
 } from 'lucide-react';
 import { EnrollModal } from './components/EnrollModal';
+import { SettingsModal } from './components/SettingsModal';
 import { UATUVoiceAssistantLauncher } from './components/UATUVoiceAssistantLauncher';
 import { IncidentQueue, type IncidentAlert, type AlertSeverity } from './components/IncidentQueue';
 
@@ -292,6 +293,9 @@ export const App: React.FC = () => {
     };
     fetchLiveEvents();
   }, []);
+
+  // System Settings & Audit Log Modal State
+  const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
 
   // Live Biometric Personnel Enrollment Modal State
   const [showEnrollModal, setShowEnrollModal] = useState<boolean>(false);
@@ -1024,18 +1028,15 @@ export const App: React.FC = () => {
               <span className="hidden md:inline">Probe</span>
             </button>
 
-            {/* Personnel Live Biometric Enrollment Gear Button */}
+            {/* System Settings & Administrative Operations Modal Button */}
             <button
-              onClick={() => {
-                setShowEnrollModal(true);
-                setEnrollFeedback(null);
-              }}
+              onClick={() => setShowSettingsModal(true)}
               className="flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white transition-all group"
-              title="Register New Personnel (Live ArcFace Biometrics)"
-              aria-label="Settings and Live Enrollment"
+              title="System Settings, Biometric Enrollment & Audit Log Export"
+              aria-label="Settings, Enrollment and Audit Export"
             >
               <Settings className="w-3.5 h-3.5 text-emerald-400 group-hover:rotate-45 transition-transform duration-200" />
-              <span className="hidden md:inline font-mono text-xs">Enroll</span>
+              <span className="hidden md:inline font-mono text-xs">Settings</span>
             </button>
 
             {/* IRIS AI Voice & Query Assistant Launcher */}
@@ -1833,6 +1834,18 @@ export const App: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* =====================================================================
+          SYSTEM SETTINGS & AUDIT LOG EXPORT MODAL
+          ===================================================================== */}
+      <SettingsModal
+        isOpen={showSettingsModal}
+        onClose={() => setShowSettingsModal(false)}
+        onOpenEnroll={() => {
+          setShowEnrollModal(true);
+          setEnrollFeedback(null);
+        }}
+      />
 
       {/* =====================================================================
           LIVE BIOMETRIC PERSONNEL ENROLLMENT MODAL

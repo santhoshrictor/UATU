@@ -48,8 +48,10 @@ class UATUTools:
             self.events_file = (
                 Path(__file__).resolve().parents[1] / "data" / "uatu_events_index.json"
             )
+            self._use_shared_fallback = True
         else:
             self.events_file = Path(events_file)
+            self._use_shared_fallback = False
 
         # Auto-create data directory if missing
         self.events_file.parent.mkdir(parents=True, exist_ok=True)
@@ -117,7 +119,7 @@ class UATUTools:
                             self._local_users = data["enrolled_users"]
             except Exception:
                 pass
-        elif not self._local_events:
+        elif self._use_shared_fallback and not self._local_events:
             # Check shared backend live_events_db.json
             shared_live_db = Path(__file__).resolve().parents[2] / "backend" / "data" / "live_events_db.json"
             if shared_live_db.exists():
