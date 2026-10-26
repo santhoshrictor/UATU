@@ -21,6 +21,7 @@ export interface FortressAuditModalProps {
   onClose: () => void;
   targetDate: string;
   backendUrl?: string;
+  onAuthorized?: (sessionToken: string, username: string, trustScore: number) => void;
 }
 
 type FortressStep = 'CREDENTIALS' | 'OTP' | 'RESULT';
@@ -37,6 +38,7 @@ export const FortressAuditModal: React.FC<FortressAuditModalProps> = ({
   onClose,
   targetDate,
   backendUrl = 'http://127.0.0.1:8000',
+  onAuthorized,
 }) => {
   const [step, setStep] = useState<FortressStep>('CREDENTIALS');
   const [username, setUsername] = useState<string>('superadmin@uatu.security');
@@ -50,6 +52,7 @@ export const FortressAuditModal: React.FC<FortressAuditModalProps> = ({
   const [exportFormat, setExportFormat] = useState<'csv' | 'jsonl'>('csv');
   const [selectedDate, setSelectedDate] = useState<string>(targetDate);
   const [simulateHacker, setSimulateHacker] = useState<boolean>(false);
+  const [authorizedToken, setAuthorizedToken] = useState<string>('');
 
   // Status & Telemetry
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -119,63 +122,103 @@ export const FortressAuditModal: React.FC<FortressAuditModalProps> = ({
     }
   };
 
-  // Step 2: Verify OTP and Download Export
+  // Step 2: Verify OTP and Authorize / Export
   const handleVerifyAndExport = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setErrorMsg(null);
     try {
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Kolkata';
-      const endpoint = `${backendUrl}/api/fortress/verify-and-export?simulate_hacker=${simulateHacker}`;
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: sessionId,
-          otp_code: otpCode.trim(),
-          date: selectedDate,
-          format: exportFormat,
-          timezone: tz,
-          user_agent: navigator.userAgent,
-          accept_language: navigator.language || 'en-US',
-          simulate_hacker: simulateHacker,
-        }),
-      });
 
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => null);
-        const detail = errorData?.error?.message || errorData?.detail || errorData || {};
-        const score = typeof detail.trust_score === 'number' ? detail.trust_score : (errorData?.trust_score ?? 35);
-        const breakdown = Array.isArray(detail.breakdown) ? detail.breakdown : (errorData?.breakdown ?? []);
-        setTrustScore(score);
-        setTrustBreakdown(breakdown);
-        setIsSuccess(false);
+      if (onAuthorized) {
+        // Direct Dashboard Authorization Flow
+        const endpoint = `${backendUrl}/api/fortress/verify-otp?simulate_hacker=${simulateHacker}`;
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: sessionId,
+            otp_code: otpCode.trim(),
+            timezone: tz,
+            user_agent: navigator.userAgent,
+            accept_language: navigator.language || 'en-US',
+            simulate_hacker: simulateHacker,
+          }),
+        });
+
+        if (!res.ok) {
+          const errorData = await res.json().catch(() => null);
+          const detail = errorData?.error?.message || errorData?.detail || errorData || {};
+          const score = typeof detail.trust_score === 'number' ? detail.trust_score : (errorData?.trust_score ?? 35);
+          const breakdown = Array.isArray(detail.breakdown) ? detail.breakdown : (errorData?.breakdown ?? []);
+          setTrustScore(score);
+          setTrustBreakdown(breakdown);
+          setIsSuccess(false);
+          setStep('RESULT');
+          throw new Error(detail.message || errorData?.message || 'Zero-Trust security block triggered.');
+        }
+
+        const data = await res.json();
+        const finalScore = data.trust_score ?? 95;
+        const finalToken = data.session_token;
+        setAuthorizedToken(finalToken);
+        setTrustScore(finalScore);
+        setTrustBreakdown(data.breakdown || []);
+        setIsSuccess(true);
         setStep('RESULT');
-        throw new Error(detail.message || errorData?.message || 'Zero-Trust security block triggered.');
+      } else {
+        // Direct Download Flow
+        const endpoint = `${backendUrl}/api/fortress/verify-and-export?simulate_hacker=${simulateHacker}`;
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: sessionId,
+            otp_code: otpCode.trim(),
+            date: selectedDate,
+            format: exportFormat,
+            timezone: tz,
+            user_agent: navigator.userAgent,
+            accept_language: navigator.language || 'en-US',
+            simulate_hacker: simulateHacker,
+          }),
+        });
+
+        if (!res.ok) {
+          const errorData = await res.json().catch(() => null);
+          const detail = errorData?.error?.message || errorData?.detail || errorData || {};
+          const score = typeof detail.trust_score === 'number' ? detail.trust_score : (errorData?.trust_score ?? 35);
+          const breakdown = Array.isArray(detail.breakdown) ? detail.breakdown : (errorData?.breakdown ?? []);
+          setTrustScore(score);
+          setTrustBreakdown(breakdown);
+          setIsSuccess(false);
+          setStep('RESULT');
+          throw new Error(detail.message || errorData?.message || 'Zero-Trust security block triggered.');
+        }
+
+        const scoreHeader = res.headers.get('X-Fortress-Trust-Score');
+        const tokenHeader = res.headers.get('X-Fortress-Session-Token');
+        const finalScore = scoreHeader ? parseInt(scoreHeader, 10) : 95;
+        if (tokenHeader) setAuthorizedToken(tokenHeader);
+        setTrustScore(finalScore);
+        setTrustBreakdown([
+          { factor: 'Network Subnet Consistency', status: 'PASS', delta: 0, detail: `Bound subnet verified (${boundSubnet})` },
+          { factor: 'Device Cryptographic Fingerprint', status: 'PASS', delta: 0, detail: 'SHA-256 fingerprint verified' },
+          { factor: 'Contextual OTP Authenticity', status: 'PASS', delta: 0, detail: 'Valid cryptographic token consumed' },
+        ]);
+        setIsSuccess(true);
+        setStep('RESULT');
+
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = exportFormat === 'jsonl' ? `uatu_runtime_audit_${selectedDate}.jsonl` : `audit_log_${selectedDate}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
       }
-
-      // Read Trust Score from response headers if available
-      const scoreHeader = res.headers.get('X-Fortress-Trust-Score');
-      const finalScore = scoreHeader ? parseInt(scoreHeader, 10) : 95;
-      setTrustScore(finalScore);
-      setTrustBreakdown([
-        { factor: 'Network Subnet Consistency', status: 'PASS', delta: 0, detail: `Bound subnet verified (${boundSubnet})` },
-        { factor: 'Device Cryptographic Fingerprint', status: 'PASS', delta: 0, detail: 'SHA-256 fingerprint verified' },
-        { factor: 'Contextual OTP Authenticity', status: 'PASS', delta: 0, detail: 'Valid cryptographic token consumed' },
-      ]);
-      setIsSuccess(true);
-      setStep('RESULT');
-
-      // Trigger File Download
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = exportFormat === 'jsonl' ? `uatu_runtime_audit_${selectedDate}.jsonl` : `audit_log_${selectedDate}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
     } catch (err: any) {
       setErrorMsg(err.message || 'Fortress export failed.');
     } finally {
@@ -455,7 +498,7 @@ export const FortressAuditModal: React.FC<FortressAuditModalProps> = ({
                   className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 active:bg-amber-600 disabled:opacity-50 text-slate-950 font-semibold text-xs uppercase tracking-wider font-mono transition-all shadow-lg shadow-amber-950/40"
                 >
                   {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
-                  <span>{isLoading ? 'Verifying Zero-Trust...' : 'Verify OTP & Export'}</span>
+                  <span>{isLoading ? 'Verifying Zero-Trust...' : (onAuthorized ? 'Verify OTP & Open Dashboard' : 'Verify OTP & Export')}</span>
                 </button>
               </div>
             </form>
@@ -491,7 +534,9 @@ export const FortressAuditModal: React.FC<FortressAuditModalProps> = ({
 
                 <p className="text-xs text-slate-400 font-mono max-w-md pt-1">
                   {isSuccess
-                    ? `Workstation cryptographically verified. ${exportFormat.toUpperCase()} audit log exported successfully.`
+                    ? (onAuthorized 
+                        ? 'Workstation cryptographically verified. Secure SuperAdmin session generated for Audit Logs Dashboard.' 
+                        : `Workstation cryptographically verified. ${exportFormat.toUpperCase()} audit log exported successfully.`)
                     : 'Untrusted device / proxy detected. Rogue session quarantined; incident recorded in immutable black box audit logs.'}
                 </p>
               </div>
@@ -526,20 +571,45 @@ export const FortressAuditModal: React.FC<FortressAuditModalProps> = ({
               </div>
 
               <div className="flex items-center gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={handleReset}
-                  className="flex-1 px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs transition-colors"
-                >
-                  Run Another Verification
-                </button>
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-semibold font-mono text-xs transition-colors"
-                >
-                  Close Gateway
-                </button>
+                {isSuccess && onAuthorized && authorizedToken ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onAuthorized(authorizedToken, username, trustScore ?? 95);
+                        onClose();
+                      }}
+                      className="flex-1 px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-slate-950 font-bold font-mono text-xs uppercase tracking-wider transition-all shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2"
+                    >
+                      <ShieldCheck className="w-4 h-4" />
+                      Open Audit Logs Dashboard →
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onClose}
+                      className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono text-xs transition-colors"
+                    >
+                      Close
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleReset}
+                      className="flex-1 px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs transition-colors"
+                    >
+                      Run Another Verification
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onClose}
+                      className="px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-semibold font-mono text-xs transition-colors"
+                    >
+                      Close Gateway
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           )}

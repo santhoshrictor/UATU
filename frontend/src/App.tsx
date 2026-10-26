@@ -20,9 +20,11 @@ import {
   Radio,
   X,
   Plus,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { EnrollModal } from './components/EnrollModal';
 import { SettingsModal } from './components/SettingsModal';
+import { AuditLogsPage } from './components/AuditLogsPage';
 import { UATUVoiceAssistantLauncher } from './components/UATUVoiceAssistantLauncher';
 import { IncidentQueue, type IncidentAlert, type AlertSeverity } from './components/IncidentQueue';
 
@@ -296,6 +298,28 @@ export const App: React.FC = () => {
 
   // System Settings & Audit Log Modal State
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
+
+  // Dedicated Audit Logs Dashboard View & Fortress Session State
+  const [activeView, setActiveView] = useState<'MULTIVIEW' | 'AUDIT_LOGS'>('MULTIVIEW');
+  const [fortressSession, setFortressSession] = useState<{
+    token: string;
+    username: string;
+    trustScore: number;
+  } | null>(() => {
+    try {
+      const raw = sessionStorage.getItem('uatu_fortress_session');
+      if (raw) return JSON.parse(raw);
+    } catch {}
+    return null;
+  });
+
+  useEffect(() => {
+    if (fortressSession) {
+      sessionStorage.setItem('uatu_fortress_session', JSON.stringify(fortressSession));
+    } else {
+      sessionStorage.removeItem('uatu_fortress_session');
+    }
+  }, [fortressSession]);
 
   // Live Biometric Personnel Enrollment Modal State
   const [showEnrollModal, setShowEnrollModal] = useState<boolean>(false);
@@ -1039,6 +1063,29 @@ export const App: React.FC = () => {
               <span className="hidden md:inline font-mono text-xs">Settings</span>
             </button>
 
+            {/* Dedicated Fortress Audit Logs Dashboard Button */}
+            <button
+              onClick={() => {
+                if (fortressSession) {
+                  setActiveView(activeView === 'AUDIT_LOGS' ? 'MULTIVIEW' : 'AUDIT_LOGS');
+                } else {
+                  setShowSettingsModal(true);
+                }
+              }}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded transition-all group ${
+                activeView === 'AUDIT_LOGS'
+                  ? 'bg-amber-500/20 border border-amber-500/60 text-amber-300 shadow-sm'
+                  : 'bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white'
+              }`}
+              title={fortressSession ? 'View Fortress Audit Logs Dashboard' : 'Unlock Fortress Audit Logs (SuperAdmin OTP)'}
+              aria-label="Audit Logs Dashboard"
+            >
+              <FileSpreadsheet className={`w-3.5 h-3.5 ${activeView === 'AUDIT_LOGS' ? 'text-amber-400' : 'text-slate-400'}`} />
+              <span className="hidden md:inline font-mono text-xs">
+                {activeView === 'AUDIT_LOGS' ? 'Live Feeds' : 'Audit Logs'}
+              </span>
+            </button>
+
             {/* IRIS AI Voice & Query Assistant Launcher */}
             <UATUVoiceAssistantLauncher />
 
@@ -1052,9 +1099,18 @@ export const App: React.FC = () => {
       </header>
 
       {/* =====================================================================
-          MAIN DASHBOARD WORKSPACE (65% / 35% SPLIT)
+          DEDICATED AUDIT LOGS DASHBOARD OR MULTIVIEW WORKSPACE
           ===================================================================== */}
-      <main className="flex-1 max-w-[1920px] w-full mx-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+      {activeView === 'AUDIT_LOGS' && fortressSession ? (
+        <AuditLogsPage
+          sessionToken={fortressSession.token}
+          superadminUser={fortressSession.username}
+          trustScore={fortressSession.trustScore}
+          onBackToMultiview={() => setActiveView('MULTIVIEW')}
+          backendUrl="http://127.0.0.1:8000"
+        />
+      ) : (
+        <main className="flex-1 max-w-[1920px] w-full mx-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* ===================================================================
             LEFT COLUMN (65% width: 8/12 columns on LG screens)
             MULTIVIEW 9-CAMERA GRID & BIOMETRIC ACCESS CONTROL
@@ -1590,6 +1646,7 @@ export const App: React.FC = () => {
           />
         </div>
       </main>
+      )}
 
       {/* =====================================================================
           SOURCE CONFIGURATION MODAL (PER-TILE ASSIGNMENT)
@@ -1844,6 +1901,11 @@ export const App: React.FC = () => {
         onOpenEnroll={() => {
           setShowEnrollModal(true);
           setEnrollFeedback(null);
+        }}
+        onFortressAuthorized={(token, user, score) => {
+          setFortressSession({ token, username: user, trustScore: score });
+          setActiveView('AUDIT_LOGS');
+          setShowSettingsModal(false);
         }}
       />
 

@@ -15,6 +15,7 @@ export interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   onOpenEnroll: () => void;
+  onFortressAuthorized?: (sessionToken: string, username: string, trustScore: number) => void;
   backendUrl?: string;
 }
 
@@ -22,6 +23,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
   onOpenEnroll,
+  onFortressAuthorized,
   backendUrl = 'http://127.0.0.1:8000',
 }) => {
   // Today's date in local YYYY-MM-DD format
@@ -201,7 +203,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   title="Verify SuperAdmin Credentials & Contextual OTP to Export Audit Logs"
                 >
                   <Shield className="w-4 h-4" />
-                  <span>Fortress Zero-Trust Export</span>
+                  <span>Fortress Preview & Export</span>
                 </button>
               </div>
             </div>
@@ -250,6 +252,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       <FortressAuditModal
         isOpen={showFortressModal}
         onClose={() => setShowFortressModal(false)}
+        onAuthorized={(sessionToken, username, trustScore) => {
+          setShowFortressModal(false);
+          onClose();
+          onFortressAuthorized?.(sessionToken, username, trustScore);
+        }}
         targetDate={selectedDate}
         backendUrl={backendUrl}
       />

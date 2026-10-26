@@ -98,6 +98,7 @@ class FortressEngine:
         self._superadmins: Dict[str, Dict[str, Any]] = {}
         self._active_otps: Dict[str, Dict[str, Any]] = {}  # session_token -> OTP details
         self._temp_tickets: Dict[str, Dict[str, Any]] = {}  # ticket -> credential session
+        self._authorized_sessions: Dict[str, Dict[str, Any]] = {}  # session_token -> verified session details
 
         self._init_default_credentials()
         self._initialized = True
@@ -387,17 +388,49 @@ class FortressEngine:
                     {"username": otp_record["username"], "trust_score": trust_score},
                 )
 
-            # Success! Consume the OTP (single use)
-            user_info = {
+            # Success! Consume the OTP (single use) and issue an authorized session token (valid 2 hours)
+            session_token = f"FTS-AUTH-{secrets.token_urlsafe(32)}"
+            session_record = {
+                "token": session_token,
                 "username": otp_record["username"],
                 "display_name": otp_record["display_name"],
                 "authorized_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
                 "trust_score": trust_score,
+                "bound_subnet": otp_record["bound_subnet"],
+                "bound_fingerprint": otp_record["bound_fingerprint"],
+                "expires_at": time.time() + 7200,
             }
+            self._authorized_sessions[session_token] = session_record
             self._active_otps.pop(session_id, None)
 
+            user_info = {
+                "username": otp_record["username"],
+                "display_name": otp_record["display_name"],
+                "authorized_at": session_record["authorized_at"],
+                "trust_score": trust_score,
+                "session_token": session_token,
+            }
+
             return True, trust_score, breakdown, None, user_info
+
+    def validate_session_token(self, token: Optional[str]) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """Validate an active authorized SuperAdmin session token."""
+        if not token:
+            return False, None
+        clean_token = token.strip()
+        if clean_token.lower().startswith("bearer "):
+            clean_token = clean_token[7:].strip()
+
+        with self._store_lock:
+            session = self._authorized_sessions.get(clean_token)
+            if not session:
+                return False, None
+            if time.time() > session.get("expires_at", 0):
+                self._authorized_sessions.pop(clean_token, None)
+                return False, None
+            return True, session
 
 
 # Global Singleton Instance
 fortress_engine = FortressEngine()
+

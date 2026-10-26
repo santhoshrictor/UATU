@@ -200,15 +200,43 @@ class AuditEngine:
 
         return sorted(list(dates), reverse=True)
 
-    def export_csv_for_date(self, date_str: Optional[str] = None) -> str:
-        """Generate formatted CSV string for all events on the specified date."""
-        target_date = date_str or self._get_date_key()
-        records = self._load_logs_for_date(target_date)
+    def get_logs_range(
+        self, start_date: Optional[str] = None, end_date: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Retrieve audit logs across a range of dates, newest first."""
+        all_dates = self.get_available_dates()
+        matched_dates = []
 
+        for d in all_dates:
+            if start_date and d < start_date:
+                continue
+            if end_date and d > end_date:
+                continue
+            matched_dates.append(d)
+
+        combined_records: List[Dict[str, Any]] = []
+        for d in matched_dates:
+            combined_records.extend(self._load_logs_for_date(d))
+
+        # Return newest first
+        return list(reversed(combined_records))
+
+    def get_all_event_types(self) -> List[str]:
+        """Return list of distinct event types found across all available dates."""
+        all_dates = self.get_available_dates()
+        types = set()
+        for d in all_dates:
+            for rec in self._load_logs_for_date(d):
+                t = rec.get("event_type")
+                if t:
+                    types.add(t)
+        return sorted(list(types))
+
+    def export_csv_records(self, records: List[Dict[str, Any]]) -> str:
+        """Format an arbitrary list of audit records as CSV."""
         output = io.StringIO()
         writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
 
-        # Headers as requested: Timestamp, Event Type, Camera Node, Details, Voice Command, Response
         headers = [
             "Timestamp (IST)",
             "Timestamp (UTC)",
@@ -239,6 +267,13 @@ class AuditEngine:
 
         return output.getvalue()
 
+    def export_csv_for_date(self, date_str: Optional[str] = None) -> str:
+        """Generate formatted CSV string for all events on the specified date."""
+        target_date = date_str or self._get_date_key()
+        records = self._load_logs_for_date(target_date)
+        return self.export_csv_records(records)
+
 
 # Global Singleton Instance
 audit_engine = AuditEngine()
+

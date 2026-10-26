@@ -1260,7 +1260,8 @@ async def fortress_verify_and_export(
         "Content-Disposition": f'attachment; filename="{filename}"',
         "X-Fortress-Trust-Score": str(trust_score),
         "X-Fortress-Authorized-By": username,
-        "Access-Control-Expose-Headers": "Content-Disposition, X-Fortress-Trust-Score, X-Fortress-Authorized-By",
+        "X-Fortress-Session-Token": user_info.get("session_token", ""),
+        "Access-Control-Expose-Headers": "Content-Disposition, X-Fortress-Trust-Score, X-Fortress-Authorized-By, X-Fortress-Session-Token",
     }
 
     return StreamingResponse(
@@ -1268,6 +1269,193 @@ async def fortress_verify_and_export(
         media_type=media_type,
         headers=headers,
     )
+
+
+class FortressVerifyOtpRequest(BaseModel):
+    session_id: str = Field(..., description="Fortress OTP session ID")
+    otp_code: str = Field(..., description="6-digit numeric OTP code")
+    timezone: Optional[str] = Field("Asia/Kolkata", description="Client browser timezone")
+    user_agent: Optional[str] = Field(None, description="Client User-Agent header")
+    accept_language: Optional[str] = Field(None, description="Client Accept-Language header")
+    simulate_hacker: Optional[bool] = Field(False, description="Hackathon demo mode: artificially trigger Zero-Trust block")
+
+
+@app.post("/api/fortress/verify-otp")
+async def fortress_verify_otp(
+    payload: FortressVerifyOtpRequest,
+    request: Request,
+    simulate_hacker: bool = False,
+):
+    """
+    Verify Fortress OTP and evaluate Trust Score (>= 80) without immediate export.
+    Returns authorized SuperAdmin session token for navigating to Audit Logs Dashboard.
+    """
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    ua = payload.user_agent or request.headers.get("user-agent", "Unknown-Browser")
+    lang = payload.accept_language or request.headers.get("accept-language", "en-US")
+    tz = payload.timezone or "Asia/Kolkata"
+
+    hacker_flag = simulate_hacker or bool(payload.simulate_hacker)
+
+    is_auth, trust_score, breakdown, err_msg, user_info = fortress_engine.verify_and_authorize_export(
+        session_id=payload.session_id,
+        presented_otp=payload.otp_code,
+        client_ip=client_ip,
+        user_agent=ua,
+        accept_language=lang,
+        timezone_str=tz,
+        simulate_hacker=hacker_flag,
+    )
+
+    if not is_auth:
+        audit_engine.log_event(
+            event_type="FORTRESS_BLOCKED_HACKER",
+            camera_node="FORTRESS-AUTH",
+            details=f"Fortress Zero-Trust BLOCKED login attempt (Trust Score: {trust_score}/100, Reason: {err_msg}).",
+            operator_id="UNTRUSTED_CLIENT",
+            payload={
+                "trust_score": trust_score,
+                "breakdown": breakdown,
+                "simulate_hacker": hacker_flag,
+                "error": err_msg,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "ZERO_TRUST_SECURITY_BLOCK",
+                "message": err_msg or "Fortress Zero-Trust security verification failed.",
+                "trust_score": trust_score,
+                "threshold": 80,
+                "breakdown": breakdown,
+            },
+        )
+
+    username = user_info.get("username", "SuperAdmin") if user_info else "SuperAdmin"
+
+    audit_engine.log_event(
+        event_type="FORTRESS_EXPORT_AUTHORIZED",
+        camera_node="FORTRESS-AUTH",
+        details=f"Fortress Zero-Trust verified (Trust Score: {trust_score}/100) for '{username}'. Access to Audit Logs Dashboard granted.",
+        operator_id=username,
+        payload={
+            "trust_score": trust_score,
+            "session_token": user_info.get("session_token", "")[:12] + "...",
+            "breakdown": breakdown,
+        },
+    )
+
+    return {
+        "status": "success",
+        "message": f"Fortress Zero-Trust authorized. Welcome, {username}.",
+        "session_token": user_info["session_token"],
+        "username": username,
+        "display_name": user_info.get("display_name", "SuperAdmin"),
+        "trust_score": trust_score,
+        "breakdown": breakdown,
+    }
+
+
+@app.get("/api/fortress/verify-session")
+async def fortress_verify_session(request: Request):
+    """
+    Validate if a SuperAdmin session token is active and unexpired.
+    """
+    auth_header = (
+        request.headers.get("x-fortress-session-token")
+        or request.headers.get("authorization")
+        or request.query_params.get("token")
+    )
+    is_valid, session_data = fortress_engine.validate_session_token(auth_header)
+    if not is_valid or not session_data:
+        return {"status": "unauthorized", "valid": False}
+    return {
+        "status": "success",
+        "valid": True,
+        "username": session_data.get("username"),
+        "display_name": session_data.get("display_name"),
+        "trust_score": session_data.get("trust_score"),
+    }
+
+
+@app.get("/api/audit-logs/records")
+async def get_audit_log_records(
+    request: Request,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    event_type: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """
+    Secure endpoint protected by SuperAdmin Fortress session token.
+    Returns filtered, paginated audit logs formatted for table rendering.
+    """
+    auth_header = (
+        request.headers.get("x-fortress-session-token")
+        or request.headers.get("authorization")
+        or request.query_params.get("token")
+    )
+    is_valid, session_data = fortress_engine.validate_session_token(auth_header)
+    if not is_valid or not session_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized: Valid SuperAdmin Fortress session required to view audit logs.",
+        )
+
+    # Fetch logs across range
+    raw_records = audit_engine.get_logs_range(start_date=start_date, end_date=end_date)
+
+    # Filter
+    filtered = []
+    q = (search or "").strip().lower()
+    t_filter = (event_type or "").strip().lower()
+
+    for r in raw_records:
+        r_type = r.get("event_type", "").lower()
+        if t_filter and t_filter != "all" and t_filter not in r_type:
+            continue
+
+        if q:
+            blob = (
+                f"{r.get('log_id', '')} {r.get('event_type', '')} {r.get('camera_node', '')} "
+                f"{r.get('zone', '')} {r.get('details', '')} {r.get('voice_command', '')} "
+                f"{r.get('agent_response', '')} {r.get('operator_id', '')}"
+            ).lower()
+            if q not in blob:
+                continue
+
+        filtered.append({
+            "id": r.get("log_id", ""),
+            "timestamp_ist": r.get("timestamp_ist", ""),
+            "timestamp_utc": r.get("timestamp_utc", ""),
+            "event_type": r.get("event_type", "SECURITY_ALERT"),
+            "actor": r.get("operator_id") or "System",
+            "source": r.get("camera_node") or "N/A",
+            "zone": r.get("zone") or "N/A",
+            "details": r.get("details") or "",
+            "voice_command": r.get("voice_command") or "",
+            "response": r.get("agent_response") or "",
+            "metadata": r.get("payload") or {},
+        })
+
+    total_count = len(filtered)
+    clamped_limit = max(1, min(500, limit))
+    clamped_offset = max(0, offset)
+    paginated = filtered[clamped_offset : clamped_offset + clamped_limit]
+
+    return {
+        "status": "success",
+        "total_count": total_count,
+        "filtered_count": len(paginated),
+        "limit": clamped_limit,
+        "offset": clamped_offset,
+        "operator": session_data.get("username", "SuperAdmin"),
+        "available_dates": audit_engine.get_available_dates(),
+        "available_event_types": audit_engine.get_all_event_types(),
+        "records": paginated,
+    }
 
 
 
