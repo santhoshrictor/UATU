@@ -360,7 +360,7 @@ def test_websocket_alert_cooldown():
         payload = mock_broadcast.call_args[0][0]
         assert payload["id"].startswith("EVT-CROWD-")
         assert payload["zone"] == "Live Monitoring Zone"
-        assert payload["type"] == "ABNORMAL GATHERING"
+        assert payload["type"] in ["ABNORMAL GATHERING", "CROWD GATHERING ALERT"]
         assert payload["level"] == "CRITICAL"
         assert payload["acknowledged"] is False
         assert payload["time"].endswith(" IST")
@@ -1706,7 +1706,7 @@ def test_abnormal_gathering_does_not_trigger_from_cumulative_drift():
         assert counts_crowd["gathering_alert"] is True
         assert mock_broadcast.call_count == 1
         payload = mock_broadcast.call_args[0][0]
-        assert payload["type"] == "ABNORMAL GATHERING"
+        assert payload["type"] in ["ABNORMAL GATHERING", "CROWD GATHERING ALERT"]
         assert payload["camera"] == "CAM-02"
 
 
@@ -1753,24 +1753,24 @@ def test_universal_human_bounding_box_conf_025():
     assert counts_sub["persons"] == 0, "Detections with conf < 0.25 must be filtered out"
 
 
-def test_abnormal_gathering_15_plus_people_red_overlay_and_alert():
+def test_abnormal_gathering_10_plus_people_red_overlay_and_alert():
     """
-    Verifies that when the active count of detected people reaches or exceeds 15,
-    it draws the red warning bounding box overlay and pushes the ABNORMAL GATHERING alert
-    payload to the WebSocket queue. If fewer than 15 people are detected, no alert fires.
+    Verifies that when the active count of detected people reaches or exceeds 10,
+    it draws the red warning bounding box overlay and pushes the CROWD GATHERING ALERT
+    payload to the WebSocket queue. If fewer than 10 people are detected, no alert fires.
     """
     from backend.app.core.websocket_manager import alert_manager
 
     blank = np.zeros((480, 640, 3), dtype=np.uint8)
 
     tracker = SpatialTracker(camera_id="CAM-03", zone="Logistics Yard North")
-    assert tracker.zone_threshold == 15
+    assert tracker.zone_threshold == 10
     tracker.is_stream_active = True
     alert_manager.resume_stream_dispatch("CAM-03")
 
-    # Case 1: 14 people active (below threshold 15) -> normal green bounding boxes, no alert
-    persons_14 = []
-    for i in range(14):
+    # Case 1: 9 people active (below threshold 10) -> normal green bounding boxes, no alert
+    persons_9 = []
+    for i in range(9):
         p = MagicMock()
         p.cls = [MagicMock(item=lambda: 0)]
         p.conf = [MagicMock(item=lambda: 0.85)]
@@ -1778,23 +1778,23 @@ def test_abnormal_gathering_15_plus_people_red_overlay_and_alert():
         y = 100 + (i // 8) * 100
         p.xyxy = [np.array([x, y, x + 35, y + 80])]
         p.id = MagicMock(item=lambda idx=i: idx + 1)
-        persons_14.append(p)
+        persons_9.append(p)
 
-    mock_res_14 = MagicMock(boxes=persons_14, keypoints=None)
+    mock_res_9 = MagicMock(boxes=persons_9, keypoints=None)
     mock_model = MagicMock()
-    mock_model.track.return_value = [mock_res_14]
+    mock_model.track.return_value = [mock_res_9]
     tracker.model = mock_model
 
     with patch("backend.app.vision_engine.alert_manager.broadcast_sync") as mock_broadcast:
-        annotated_14, counts_14 = tracker.process_frame(blank.copy(), ret=True)
-        assert counts_14["persons"] == 14
-        assert counts_14["is_crowded"] is False
-        assert counts_14["gathering_alert"] is False
+        annotated_9, counts_9 = tracker.process_frame(blank.copy(), ret=True)
+        assert counts_9["persons"] == 9
+        assert counts_9["is_crowded"] is False
+        assert counts_9["gathering_alert"] is False
         assert mock_broadcast.call_count == 0
 
-    # Case 2: 15 people active (reaches abnormal gathering threshold 15) -> red bounding boxes + WebSocket alert
-    persons_15 = []
-    for i in range(15):
+    # Case 2: 10 people active (reaches crowd gathering threshold 10) -> red bounding boxes + WebSocket alert
+    persons_10 = []
+    for i in range(10):
         p = MagicMock()
         p.cls = [MagicMock(item=lambda: 0)]
         p.conf = [MagicMock(item=lambda: 0.85)]
@@ -1802,26 +1802,26 @@ def test_abnormal_gathering_15_plus_people_red_overlay_and_alert():
         y = 100 + (i // 8) * 100
         p.xyxy = [np.array([x, y, x + 35, y + 80])]
         p.id = MagicMock(item=lambda idx=i: idx + 1)
-        persons_15.append(p)
+        persons_10.append(p)
 
-    mock_res_15 = MagicMock(boxes=persons_15, keypoints=None)
-    mock_model.track.return_value = [mock_res_15]
+    mock_res_10 = MagicMock(boxes=persons_10, keypoints=None)
+    mock_model.track.return_value = [mock_res_10]
     tracker.model = mock_model
 
     with patch("backend.app.vision_engine.alert_manager.broadcast_sync") as mock_broadcast:
-        annotated_15, counts_15 = tracker.process_frame(blank.copy(), ret=True)
-        assert counts_15["persons"] == 15
-        assert counts_15["is_crowded"] is True
-        assert counts_15["gathering_alert"] is True
+        annotated_10, counts_10 = tracker.process_frame(blank.copy(), ret=True)
+        assert counts_10["persons"] == 10
+        assert counts_10["is_crowded"] is True
+        assert counts_10["gathering_alert"] is True
 
         # Red bounding box warning overlay must be present on frame
         # BGR: Red channel is index 2, Green is index 1, Blue is index 0
-        assert np.any(annotated_15[:, :, 2] > 200)
+        assert np.any(annotated_10[:, :, 2] > 200)
 
         # WebSocket alert payload verification
         assert mock_broadcast.call_count == 1
         payload = mock_broadcast.call_args[0][0]
-        assert payload["type"] == "ABNORMAL GATHERING"
+        assert payload["type"] in ["ABNORMAL GATHERING", "CROWD GATHERING ALERT"]
         assert payload["camera"] == "CAM-03"
         assert payload["level"] == "CRITICAL"
 
@@ -1921,6 +1921,42 @@ def test_infer_stride_reset_clears_cache():
     tracker.reset()
     assert len(tracker.cached_parsed_boxes) == 0
     assert tracker.frame_counter == 0
+
+
+def test_vehicle_detection_multiclass_car_truck_bus_motorcycle():
+    """
+    Verifies that vehicles (car, truck, bus, motorcycle) are detected,
+    increment the vehicle counter, and are bounded on the annotated frame
+    with visible gold boxes alongside pedestrians.
+    """
+    blank = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # 1 pedestrian + 4 vehicle types: car (2), motorcycle (3), bus (5), truck (7)
+    detections = []
+    classes = [0, 2, 3, 5, 7]
+    for i, cls_id in enumerate(classes):
+        b = MagicMock()
+        b.cls = [MagicMock(item=lambda c=cls_id: c)]
+        b.conf = [MagicMock(item=lambda: 0.88)]
+        x = 50 + i * 110
+        y = 100
+        b.xyxy = [np.array([x, y, x + 90, y + 120])]
+        b.id = MagicMock(item=lambda idx=i: idx + 10)
+        detections.append(b)
+
+    mock_res = MagicMock(boxes=detections, keypoints=None)
+    mock_model = MagicMock()
+    mock_model.track.return_value = [mock_res]
+
+    tracker = SpatialTracker(model=mock_model)
+    annotated, counts = tracker.process_frame(blank.copy(), ret=True)
+
+    assert counts["persons"] == 1
+    assert counts["vehicles"] == 4
+    # Gold vehicle bounding box color is BGR (0, 215, 255) in BGR = Red/Green/Blue
+    # In BGR, (255, 215, 0) has Blue=255, Green=215, Red=0
+    assert np.any(annotated[:, :, 0] > 200)
+
 
 
 

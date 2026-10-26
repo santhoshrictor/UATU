@@ -30,6 +30,16 @@ SKELETON_EDGES = [
     (12, 14), (14, 16),                  # Right leg (hip -> knee -> ankle)
 ]
 
+# COCO Classes for Pedestrian and Vehicle Perception
+COCO_PERSON_CLASS = 0
+COCO_VEHICLE_CLASSES = {
+    2: "Car",
+    3: "Motorcycle",
+    5: "Bus",
+    7: "Truck",
+}
+ALL_ACTIVE_CLASSES = [COCO_PERSON_CLASS, *COCO_VEHICLE_CLASSES.keys()]
+
 
 class SpatialTracker:
     def __init__(
@@ -68,13 +78,19 @@ class SpatialTracker:
         if model is not None:
             self.model = model
         else:
-            # Safely locate and load the YOLO11n-Pose model (Feature 17: Fall Detection)
-            model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models", "yolo11n-pose.pt"))
-            os.makedirs(os.path.dirname(model_path), exist_ok=True)
+            # Safely locate and load certified YOLO model supporting pedestrian & vehicle detection
+            yolo_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models"))
+            os.makedirs(yolo_dir, exist_ok=True)
+            candidate_paths = [
+                os.path.join(yolo_dir, "yolo11n.pt"),
+                os.path.join(yolo_dir, "yolov8n.pt"),
+                os.path.join(yolo_dir, "yolo11n-pose.pt"),
+            ]
+            model_path = next((p for p in candidate_paths if os.path.exists(p)), candidate_paths[0])
             try:
                 self.model = YOLO(model_path)
             except Exception as e:
-                logger.error(f"Error loading YOLO pose model at {model_path}: {e}")
+                logger.error(f"Error loading YOLO model at {model_path}: {e}")
                 self.model = None
 
         self.previous_y = {}
@@ -90,13 +106,13 @@ class SpatialTracker:
         self.track_history = {}
 
         # Feature 15 & 16: Zone definition and Crowding/Occupancy threshold
-        # Abnormal gathering triggers when 15 or more people are actively detected in the frame simultaneously
+        # Crowd gathering alert triggers when 10 or more people are actively detected concurrently in the frame
         if zone_threshold is not None:
             self.zone_threshold = zone_threshold
         elif kwargs.get("zone_threshold") is not None:
             self.zone_threshold = kwargs.get("zone_threshold")
         else:
-            self.zone_threshold = 15
+            self.zone_threshold = 10
 
         if zone_pts is not None:
             self.zone_pts = np.array(zone_pts, np.int32)
@@ -364,20 +380,44 @@ class SpatialTracker:
             )
 
             if should_infer:
-                # 1. Run Tracker (Using yolo11n-pose.pt) with calibrated person conf threshold
+                # 1. Run Tracker with calibrated conf threshold and pedestrian/vehicle class filtering
                 active_model = self.model
                 if active_model is not None:
                     if hasattr(active_model, "track") and callable(getattr(active_model, "track")):
                         try:
-                            track_out = active_model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False, conf=self.person_conf_threshold)
+                            track_out = active_model.track(
+                                frame,
+                                persist=True,
+                                tracker="bytetrack.yaml",
+                                verbose=False,
+                                conf=self.person_conf_threshold,
+                                classes=ALL_ACTIVE_CLASSES,
+                            )
                         except TypeError:
-                            track_out = active_model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False)
+                            try:
+                                track_out = active_model.track(
+                                    frame,
+                                    persist=True,
+                                    tracker="bytetrack.yaml",
+                                    verbose=False,
+                                    conf=self.person_conf_threshold,
+                                )
+                            except TypeError:
+                                track_out = active_model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False)
                         results = track_out[0] if isinstance(track_out, (list, tuple)) else track_out
                     else:
                         try:
-                            call_out = active_model(frame, verbose=False, conf=self.person_conf_threshold)
+                            call_out = active_model(
+                                frame,
+                                verbose=False,
+                                conf=self.person_conf_threshold,
+                                classes=ALL_ACTIVE_CLASSES,
+                            )
                         except TypeError:
-                            call_out = active_model(frame, verbose=False)
+                            try:
+                                call_out = active_model(frame, verbose=False, conf=self.person_conf_threshold)
+                            except TypeError:
+                                call_out = active_model(frame, verbose=False)
                         results = call_out[0] if isinstance(call_out, (list, tuple)) else call_out
                 else:
                     results = None
@@ -740,9 +780,10 @@ class SpatialTracker:
                                     self.exit_count = self.up_count
 
                                 parsed_boxes.append((x1, y1, x2, y2, center_y, True, tid, is_falling, person_kpts))
-                            elif class_id in [2, 3, 5, 7]:  # Vehicles
+                            elif class_id in COCO_VEHICLE_CLASSES:  # Vehicles: Car (2), Motorcycle (3), Bus (5), Truck (7)
                                 vehicles_count += 1
-                                parsed_boxes.append((x1, y1, x2, y2, center_y, False, None, False, None))
+                                v_name = COCO_VEHICLE_CLASSES[class_id]
+                                parsed_boxes.append((x1, y1, x2, y2, center_y, False, tid, False, v_name))
 
                 # Real-Time Occupancy & Crowd Calculation:
                 # Active people count in the monitored zone / frame
@@ -791,7 +832,7 @@ class SpatialTracker:
                 cv2.polylines(frame, [self.zone_pts], isClosed=True, color=(0, 0, 255), thickness=2)
                 cv2.putText(
                     frame,
-                    "WARNING: ABNORMAL GATHERING",
+                    "WARNING: CROWD GATHERING ALERT",
                     (self.zone_pts[0][0], max(25, self.zone_pts[0][1] - 10)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.65,
@@ -801,10 +842,10 @@ class SpatialTracker:
                 )
 
             # 3. Dynamic Overlay: Bounding Boxes, Skeletons & Fall Indicator
-            for x1, y1, x2, y2, center_y, is_person, tid, is_falling, p_kpts in parsed_boxes:
+            for x1, y1, x2, y2, center_y, is_person, tid, is_falling, p_kpts, *extra in parsed_boxes:
                 if is_person:
                     # Turns red and displays CRITICAL: FALL DETECTED the exact moment fall_detected is True
-                    # Turns red warning bounding box overlay when ABNORMAL GATHERING (is_crowded) is detected
+                    # Turns red warning bounding box overlay when ABNORMAL GATHERING / CROWD GATHERING (is_crowded) is detected
                     is_active_fall = is_falling or (fall_detected and len(parsed_boxes) == 1)
                     if is_active_fall or is_crowded:
                         color = (0, 0, 255)  # Pure Red warning overlay
@@ -885,16 +926,19 @@ class SpatialTracker:
                             cv2.LINE_AA,
                         )
                 else:
+                    # Vehicle bounding box (Car, Truck, Bus, Motorcycle)
                     color = (255, 215, 0)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    v_type = p_kpts if isinstance(p_kpts, str) else (extra[0] if extra else "Vehicle")
+                    v_label = f"ID:{tid} [{v_type}]" if tid is not None else f"[{v_type}]"
                     cv2.putText(
                         frame,
-                        "Vehicle",
+                        v_label,
                         (x1, max(12, y1 - 4)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.45,
                         color,
-                        1,
+                        2,
                         cv2.LINE_AA,
                     )
 
@@ -921,12 +965,18 @@ class SpatialTracker:
                     self.last_alert_time = now_ts
                     alert_payload = {
                         "id": f"EVT-CROWD-{int(now_ts)}",
+                        "event_id": f"EVT-CROWD-{int(now_ts)}",
                         "time": datetime.now(IST).strftime("%H:%M:%S IST"),
+                        "timestamp_ist": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
                         "zone": self.zone_name,
                         "camera": self.camera_id,
-                        "type": "ABNORMAL GATHERING",
+                        "camera_id": self.camera_id,
+                        "type": "CROWD GATHERING ALERT",
                         "level": "CRITICAL",
-                        "detail": f"Occupancy threshold breached on {self.camera_id} ({self.zone_name}).",
+                        "alarm_class": "CRITICAL",
+                        "detail": f"Crowd gathering alert (10+ persons) breached on {self.camera_id} ({self.zone_name}): {active_crowd_count} persons present.",
+                        "person_count": active_crowd_count,
+                        "occupancy": occupancy_count,
                         "acknowledged": False,
                     }
                     logger.warning(f"WebSocket Alert Fired: {alert_payload}")

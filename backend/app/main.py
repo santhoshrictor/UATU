@@ -364,10 +364,10 @@ class CameraDeviceWorker:
                         self.last_crowd_alert_time = now_ts
                         event_id = f"EVT-CROWD-{int(now_ts)}"
                         snap_url = live_event_store.save_event_snapshot(event_id, annotated_frame)
-                        detail_text = f"Occupancy threshold breached on {self.camera_id} ({self.zone_name}): {counts.get('occupancy', 0)} persons present."
+                        detail_text = f"Crowd gathering alert (10+ persons) breached on {self.camera_id} ({self.zone_name}): {counts.get('occupancy', counts.get('persons', 0))} persons present."
                         live_event_store.record_live_event(
                             event_id=event_id,
-                            event_type="ABNORMAL GATHERING",
+                            event_type="CROWD GATHERING ALERT",
                             camera_id=self.camera_id,
                             zone=self.zone_name,
                             alarm_class="CRITICAL",
@@ -388,7 +388,7 @@ class CameraDeviceWorker:
                             "zone": self.zone_name,
                             "camera": self.camera_id,
                             "camera_id": self.camera_id,
-                            "type": "ABNORMAL GATHERING",
+                            "type": "CROWD GATHERING ALERT",
                             "level": "CRITICAL",
                             "alarm_class": "CRITICAL",
                             "detail": detail_text,
