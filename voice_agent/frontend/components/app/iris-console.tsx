@@ -125,44 +125,10 @@ export function IrisConsole({ appConfig }: { appConfig: AppConfig }) {
   const [motionPaused, setMotionPaused] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [connectionError, setConnectionError] = useState('');
-  const [connectingSeconds, setConnectingSeconds] = useState(0);
   const [activePromptId, setActivePromptId] = useState<string | null>(null);
 
-  const isConnecting =
-    isStarting ||
-    session.connectionState === 'connecting' ||
-    (session.isConnected && agentState === 'connecting');
-
-  // Watchdog: prevent indefinite freeze on "Establishing Secure Telemetry"
-  useEffect(() => {
-    if (!isConnecting) {
-      setConnectingSeconds(0);
-      return;
-    }
-
-    const interval = setInterval(() => {
-      setConnectingSeconds((prev) => {
-        const next = prev + 1;
-        if (next >= 12) {
-          setIsStarting(false);
-          setConnectionError(
-            'Telemetry handshake timed out after 12s. The local LiveKit agent worker or Gemini Live session is delayed.'
-          );
-          try {
-            void session.end();
-          } catch {}
-          return 0;
-        }
-        return next;
-      });
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [isConnecting, session]);
-
-  const phase = connectionError
-    ? 'failed'
-    : isConnecting
+  const phase =
+    isStarting || session.connectionState === 'connecting'
       ? 'connecting'
       : !session.isConnected
         ? 'standby'
@@ -190,7 +156,6 @@ export function IrisConsole({ appConfig }: { appConfig: AppConfig }) {
     if (isStarting || session.isConnected) return;
     setConnectionError('');
     setIsStarting(true);
-    setConnectingSeconds(0);
     try {
       await session.start();
     } catch {
@@ -200,21 +165,6 @@ export function IrisConsole({ appConfig }: { appConfig: AppConfig }) {
     } finally {
       setIsStarting(false);
     }
-  }
-
-  async function cancelCall() {
-    setIsStarting(false);
-    setConnectingSeconds(0);
-    setConnectionError('');
-    try {
-      await session.end();
-    } catch {}
-  }
-
-  async function retryCall() {
-    await cancelCall();
-    await new Promise((resolve) => setTimeout(resolve, 350));
-    await startCall();
   }
 
   async function endCall() {
@@ -390,36 +340,7 @@ export function IrisConsole({ appConfig }: { appConfig: AppConfig }) {
             <p>{status.detail}</p>
           </div>
 
-          {connectionError && (
-            <div className="iris-telemetry-alert-box" role="alert">
-              <div className="iris-telemetry-alert-header">
-                <ShieldAlert size={15} />
-                <span>TELEMETRY CONNECTION TIMED OUT / INTERRUPTED</span>
-              </div>
-              <p className="iris-telemetry-alert-detail">{connectionError}</p>
-              <div className="iris-telemetry-alert-actions">
-                <button
-                  type="button"
-                  onClick={() => void retryCall()}
-                  className="iris-telemetry-btn iris-telemetry-btn--reconnect"
-                  title="Retry WebRTC & Gemini Live session"
-                >
-                  <RotateCcw size={13} />
-                  Reconnect Telemetry
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void cancelCall()}
-                  className="iris-telemetry-btn iris-telemetry-btn--cancel"
-                  title="Dismiss error and return to standby"
-                >
-                  Cancel &amp; Standby
-                </button>
-              </div>
-            </div>
-          )}
-
-          {!session.isConnected && !connectionError && (
+          {!session.isConnected && (
             <div className="iris-start-area">
               <button
                 className="iris-start-button"
@@ -427,29 +348,19 @@ export function IrisConsole({ appConfig }: { appConfig: AppConfig }) {
                 onClick={() => void startCall()}
               >
                 <Power size={17} strokeWidth={1.6} />
-                <span>
-                  {isStarting
-                    ? `Establishing Telemetry (${connectingSeconds}s)...`
-                    : appConfig.startButtonText}
-                </span>
-                <span className={`iris-start-button__arrow ${isStarting ? 'animate-spin' : ''}`}>
-                  {isStarting ? '⟳' : '↗'}
-                </span>
+                <span>{isStarting ? 'Connecting to UATU...' : appConfig.startButtonText}</span>
+                <span className="iris-start-button__arrow">↗</span>
               </button>
-              {isStarting && (
-                <button
-                  type="button"
-                  onClick={() => void cancelCall()}
-                  className="iris-cancel-connecting-link"
-                >
-                  Cancel Handshake
-                </button>
-              )}
               <span className="iris-start-hint">
-                <Mic size={11} /> Microphone access enabled for bilingual voice commands (Watchdog
-                12s)
+                <Mic size={11} /> Microphone access enabled for bilingual voice commands
               </span>
             </div>
+          )}
+
+          {connectionError && (
+            <p className="iris-connection-error" role="alert">
+              {connectionError}
+            </p>
           )}
 
           {session.isConnected && (

@@ -728,59 +728,17 @@ async def websocket_alerts_endpoint(websocket: WebSocket):
     """
     Real-time WebSocket stream pushing spatial AI alerts directly
     to connected React dashboards (e.g., Abnormal Gathering, Occupancy).
-    Includes bidirectional ping/pong keep-alive heartbeats (15s interval)
-    to prevent idle socket timeouts during local network handshakes.
     """
     await alert_manager.connect(websocket)
-
-    async def heartbeat_sender():
-        try:
-            while True:
-                await asyncio.sleep(15.0)
-                await websocket.send_text(
-                    json.dumps({
-                        "type": "HEARTBEAT",
-                        "status": "ALIVE",
-                        "timestamp": time.time(),
-                    })
-                )
-        except (WebSocketDisconnect, asyncio.CancelledError):
-            pass
-        except Exception as ping_err:
-            logger.debug(f"Heartbeat send terminated: {ping_err}")
-
-    async def message_receiver():
-        try:
-            while True:
-                data = await websocket.receive_text()
-                if data == "ping":
-                    await websocket.send_text("pong")
-                elif data == "pong":
-                    # Client keepalive acknowledgment
-                    pass
-        except (WebSocketDisconnect, asyncio.CancelledError):
-            pass
-        except Exception as recv_err:
-            logger.debug(f"Message receiver terminated: {recv_err}")
-
-    pinger_task = asyncio.create_task(heartbeat_sender())
-    receiver_task = asyncio.create_task(message_receiver())
-
     try:
-        # Wait until either the sender fails (client disconnected) or receiver fails
-        done, pending = await asyncio.wait(
-            [pinger_task, receiver_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
     except WebSocketDisconnect:
-        pass
+        alert_manager.disconnect(websocket)
     except Exception as e:
         logger.info(f"WebSocket client disconnected: {e}")
-    finally:
-        pinger_task.cancel()
-        receiver_task.cancel()
         alert_manager.disconnect(websocket)
 
 

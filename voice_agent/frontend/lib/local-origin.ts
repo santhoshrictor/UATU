@@ -13,9 +13,11 @@ export function sameOrigin(request: Request): boolean {
     }
     // Allow loopback ports 3000 (HUD console), 5173 (UATU Vite dashboard), 8000 (FastAPI) or same host
     return (
-      ['3000', '5173', '8000'].includes(origin.port) || origin.host === request.headers.get('host')
+      ['3000', '5173', '8000'].includes(origin.port) ||
+      origin.host === request.headers.get('host')
     );
   } catch {
     return false;
   }
 }
+
