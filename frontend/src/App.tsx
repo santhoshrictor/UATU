@@ -411,6 +411,7 @@ export const App: React.FC = () => {
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let pingTimer: ReturnType<typeof setInterval> | null = null;
     let isDisposed = false;
 
     const connectAlertWs = () => {
@@ -422,11 +423,25 @@ export const App: React.FC = () => {
 
         ws.onopen = () => {
           console.log('[UATU Alert Bridge] Connected to WebSocket alert stream:', wsUrl);
+          // Standard 15s keep-alive ping to prevent idle socket drops during telemetric handshakes
+          if (pingTimer) clearInterval(pingTimer);
+          pingTimer = setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send('ping');
+            }
+          }, 15000);
         };
 
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
+            // Ignore/acknowledge keepalive heartbeats
+            if (data && (data.type === 'HEARTBEAT' || data.type === 'ping')) {
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send('pong');
+              }
+              return;
+            }
             // Handle Spatial & Layout Control Commands (dispatched by IRIS voice assistant)
             if (data && (data.action === 'LAYOUT_CHANGE' || data.type === 'UI_LAYOUT_COMMAND')) {
               console.log('[UATU Spatial Control] Received layout command:', data);
@@ -467,15 +482,18 @@ export const App: React.FC = () => {
         };
 
         ws.onclose = () => {
+          if (pingTimer) clearInterval(pingTimer);
           if (!isDisposed) {
             reconnectTimer = setTimeout(connectAlertWs, 3000);
           }
         };
 
         ws.onerror = () => {
+          if (pingTimer) clearInterval(pingTimer);
           ws?.close();
         };
       } catch (err) {
+        if (pingTimer) clearInterval(pingTimer);
         if (!isDisposed) {
           reconnectTimer = setTimeout(connectAlertWs, 3000);
         }
@@ -486,6 +504,7 @@ export const App: React.FC = () => {
 
     return () => {
       isDisposed = true;
+      if (pingTimer) clearInterval(pingTimer);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (ws) ws.close();
     };

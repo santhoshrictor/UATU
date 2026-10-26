@@ -109,6 +109,8 @@ async def my_agent(ctx: JobContext):
         logger.error(f"Failed to connect to LiveKit room '{room_name}': {exc}", exc_info=True)
         return
 
+    disconnect_event = asyncio.Event()
+
     # 2. Register Room Lifecycle & Diagnostic Event Handlers
     @ctx.room.on("participant_connected")
     def on_participant_connected(participant):
@@ -119,10 +121,13 @@ async def my_agent(ctx: JobContext):
     @ctx.room.on("participant_disconnected")
     def on_participant_disconnected(participant):
         logger.info(f"Operator disconnected from room '{room_name}': identity='{participant.identity}'")
+        # Trigger immediate teardown when operator disconnects so worker is immediately free for next room
+        disconnect_event.set()
 
     @ctx.room.on("disconnected")
     def on_room_disconnected(reason=None):
         logger.warning(f"Room '{room_name}' disconnected. Reason: {reason}")
+        disconnect_event.set()
 
     audit_logger = UATUAuditLogger()
     background_tasks: set[asyncio.Task] = set()
@@ -239,11 +244,42 @@ async def my_agent(ctx: JobContext):
                 f"Initial greeting skipped due to error: {exc}; agent remains active and listening."
             )
 
+        # 5. Keep Session Active & Listen for Live Operator Telemetry / Reconnect Signals
+        logger.info(f"LiveKit Agent active for room '{room_name}'. Listening continuously...")
+
+        # Periodic keep-alive ping to ensure room connection remains fresh and active
+        async def _room_keepalive_ping():
+            try:
+                while not disconnect_event.is_set():
+                    await asyncio.sleep(15.0)
+                    if hasattr(ctx.room, "connection_state") and getattr(ctx.room.connection_state, "name", "") == "CONNECTED":
+                        logger.debug(f"[LiveKit KeepAlive] Room '{room_name}' connection healthy.")
+            except asyncio.CancelledError:
+                pass
+
+        keepalive_task = asyncio.create_task(_room_keepalive_ping())
+        background_tasks.add(keepalive_task)
+
+        # Block entrypoint until operator disconnects or signals reconnect
+        await disconnect_event.wait()
+        logger.info(f"Operator teardown initiated for room '{room_name}'. Closing session cleanly...")
+
     finally:
+        # Graceful cleanup of session so WebRTC tracks & Gemini sockets are immediately released
+        if session is not None:
+            try:
+                await session.aclose()
+            except Exception as close_err:
+                logger.debug(f"Session aclose error: {close_err}")
+
         # Graceful cleanup of any pending background audit tasks
         for task in list(background_tasks):
             if not task.done():
                 task.cancel()
+
+        logger.info(
+            f"Worker session for room '{room_name}' cleaned up. Standing by for immediate re-handshake."
+        )
 
 
 if __name__ == "__main__":

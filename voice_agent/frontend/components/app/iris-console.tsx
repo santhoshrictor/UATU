@@ -213,6 +213,7 @@ export function IrisConsole({ appConfig }: { appConfig: AppConfig }) {
 
   async function retryCall() {
     await cancelCall();
+    await new Promise((resolve) => setTimeout(resolve, 350));
     await startCall();
   }
 
