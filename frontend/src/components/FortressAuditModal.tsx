@@ -19,9 +19,9 @@ import {
 export interface FortressAuditModalProps {
   isOpen: boolean;
   onClose: () => void;
-  targetDate: string;
+  targetDate?: string;
   backendUrl?: string;
-  onAuthorized?: (sessionToken: string, username: string, trustScore: number) => void;
+  onAuthorized?: (sessionToken: string, username: string, trustScore: number, targetDate: string) => void;
 }
 
 type FortressStep = 'CREDENTIALS' | 'OTP' | 'RESULT';
@@ -40,6 +40,14 @@ export const FortressAuditModal: React.FC<FortressAuditModalProps> = ({
   backendUrl = 'http://127.0.0.1:8000',
   onAuthorized,
 }) => {
+  const getTodayDateStr = () => {
+    const d = new Date();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
   const [step, setStep] = useState<FortressStep>('CREDENTIALS');
   const [username, setUsername] = useState<string>('superadmin@uatu.security');
   const [password, setPassword] = useState<string>('SuperAdmin@2026!');
@@ -50,7 +58,7 @@ export const FortressAuditModal: React.FC<FortressAuditModalProps> = ({
   const [maskedOtp, setMaskedOtp] = useState<string>('');
   const [boundSubnet, setBoundSubnet] = useState<string>('');
   const [exportFormat, setExportFormat] = useState<'csv' | 'jsonl'>('csv');
-  const [selectedDate, setSelectedDate] = useState<string>(targetDate);
+  const [selectedDate, setSelectedDate] = useState<string>(targetDate || getTodayDateStr());
   const [simulateHacker, setSimulateHacker] = useState<boolean>(false);
   const [authorizedToken, setAuthorizedToken] = useState<string>('');
 
@@ -423,30 +431,36 @@ export const FortressAuditModal: React.FC<FortressAuditModalProps> = ({
                 />
               </div>
 
-              {/* Date & Format Selectors */}
-              <div className="grid grid-cols-2 gap-3 pt-1">
-                <div>
-                  <label className="block text-[11px] font-mono text-slate-400 mb-1 flex items-center gap-1">
-                    <Calendar className="w-3 h-3 text-slate-500" /> Target Date:
+              {/* Target Audit Date & Format Selection */}
+              <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-mono text-slate-300 font-semibold flex items-center gap-1.5">
+                    <Calendar className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Target Audit Date for Telemetry:</span>
                   </label>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedDate(getTodayDateStr())}
+                    className="text-[10px] font-mono text-cyan-400 hover:text-cyan-300 underline"
+                  >
+                    Today
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   <input
                     type="date"
                     value={selectedDate}
                     onChange={(e) => setSelectedDate(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-amber-400"
+                    max={getTodayDateStr()}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-cyan-400"
                   />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-mono text-slate-400 mb-1">
-                    Export Format:
-                  </label>
                   <select
                     value={exportFormat}
                     onChange={(e) => setExportFormat(e.target.value as 'csv' | 'jsonl')}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-amber-400"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-cyan-400"
                   >
-                    <option value="csv">Standard CSV Log</option>
-                    <option value="jsonl">Raw JSONL Telemetry</option>
+                    <option value="csv">Default Export: CSV</option>
+                    <option value="jsonl">Raw Telemetry: JSONL</option>
                   </select>
                 </div>
               </div>
@@ -570,13 +584,33 @@ export const FortressAuditModal: React.FC<FortressAuditModalProps> = ({
                 </div>
               </div>
 
+              {/* Target Audit Date Selection / Confirmation */}
+              {isSuccess && (
+                <div className="p-3.5 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between gap-3 text-xs font-mono">
+                  <div className="flex items-center gap-2">
+                    <Calendar className="w-4 h-4 text-cyan-400 shrink-0" />
+                    <div>
+                      <span className="text-slate-400 block text-[10px] uppercase tracking-wider">Target Audit Date:</span>
+                      <span className="text-slate-200 font-semibold">{selectedDate}</span>
+                    </div>
+                  </div>
+                  <input
+                    type="date"
+                    value={selectedDate}
+                    onChange={(e) => setSelectedDate(e.target.value)}
+                    max={getTodayDateStr()}
+                    className="bg-slate-900 border border-slate-700 rounded px-2.5 py-1 text-xs font-mono text-slate-200 focus:outline-none focus:border-cyan-400"
+                  />
+                </div>
+              )}
+
               <div className="flex items-center gap-3 pt-2">
                 {isSuccess && onAuthorized && authorizedToken ? (
                   <>
                     <button
                       type="button"
                       onClick={() => {
-                        onAuthorized(authorizedToken, username, trustScore ?? 95);
+                        onAuthorized(authorizedToken, username, trustScore ?? 95, selectedDate);
                         onClose();
                       }}
                       className="flex-1 px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-slate-950 font-bold font-mono text-xs uppercase tracking-wider transition-all shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2"

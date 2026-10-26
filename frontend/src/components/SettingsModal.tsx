@@ -4,10 +4,9 @@ import {
   X,
   UserPlus,
   FileSpreadsheet,
-  Calendar,
   Shield,
   ShieldCheck,
-  Loader2,
+  Lock,
 } from 'lucide-react';
 import { FortressAuditModal } from './FortressAuditModal';
 
@@ -15,7 +14,7 @@ export interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   onOpenEnroll: () => void;
-  onFortressAuthorized?: (sessionToken: string, username: string, trustScore: number) => void;
+  onFortressAuthorized?: (sessionToken: string, username: string, trustScore: number, targetDate: string) => void;
   backendUrl?: string;
 }
 
@@ -26,65 +25,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onFortressAuthorized,
   backendUrl = 'http://127.0.0.1:8000',
 }) => {
-  // Today's date in local YYYY-MM-DD format
-  const getTodayDateStr = () => {
-    const d = new Date();
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  };
-
-  const [selectedDate, setSelectedDate] = useState<string>(getTodayDateStr());
   const [showFortressModal, setShowFortressModal] = useState<boolean>(false);
-  const [logCount, setLogCount] = useState<number | null>(null);
-  const [availableDates, setAvailableDates] = useState<string[]>([]);
-  const [isLoadingLogs, setIsLoadingLogs] = useState<boolean>(false);
 
   // Close on Escape key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
+      if (e.key === 'Escape' && isOpen && !showFortressModal) {
         onClose();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
-
-  // Query audit logs metadata for the selected date whenever date changes or modal opens
-  useEffect(() => {
-    if (!isOpen) return;
-
-    let isMounted = true;
-    const fetchLogInfo = async () => {
-      setIsLoadingLogs(true);
-      try {
-        const res = await fetch(`${backendUrl}/api/audit-logs?date=${encodeURIComponent(selectedDate)}`);
-        if (res.ok) {
-          const data = await res.json();
-          if (isMounted) {
-            setLogCount(data.count ?? 0);
-            if (Array.isArray(data.available_dates)) {
-              setAvailableDates(data.available_dates);
-            }
-          }
-        } else {
-          if (isMounted) setLogCount(0);
-        }
-      } catch (err) {
-        console.warn('Failed to query audit logs:', err);
-        if (isMounted) setLogCount(0);
-      } finally {
-        if (isMounted) setIsLoadingLogs(false);
-      }
-    };
-
-    fetchLogInfo();
-    return () => {
-      isMounted = false;
-    };
-  }, [isOpen, selectedDate, backendUrl]);
+  }, [isOpen, onClose, showFortressModal]);
 
   if (!isOpen) return null;
 
@@ -150,50 +102,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
             </div>
 
-            {/* Option 2: Audit Log CSV Export */}
-            <div className="flex flex-col justify-between p-5 rounded-lg bg-slate-950/70 border border-slate-800 hover:border-cyan-500/40 transition-all group">
+            {/* Option 2: Audit Log Telemetry & Export */}
+            <div className="flex flex-col justify-between p-5 rounded-lg bg-slate-950/70 border border-slate-800 hover:border-amber-500/40 transition-all group">
               <div className="space-y-3">
-                <div className="w-10 h-10 rounded-lg bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 group-hover:scale-105 transition-transform">
+                <div className="w-10 h-10 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 group-hover:scale-105 transition-transform">
                   <FileSpreadsheet className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="font-semibold text-slate-100 font-mono text-sm">
-                    Audit Log Export
-                  </h3>
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-semibold text-slate-100 font-mono text-sm">
+                      Audit Log Export
+                    </h3>
+                    <span className="flex items-center gap-1 text-[10px] font-mono text-amber-400 bg-amber-950/40 px-1.5 py-0.5 rounded border border-amber-800/40">
+                      <Lock className="w-3 h-3" />
+                      Zero-Trust
+                    </span>
+                  </div>
                   <p className="text-xs text-slate-400 mt-1 leading-relaxed">
-                    Export date-wise chronological records of camera alerts, face mismatches, operator acknowledgments, and AI voice commands to CSV.
+                    Securely preview and export date-wise chronological records of camera alerts, face mismatches, operator actions, and AI voice query telemetry.
                   </p>
                 </div>
               </div>
 
-              {/* Date Selection Controls */}
-              <div className="pt-4 mt-2 space-y-3 border-t border-slate-800/80">
-                <div>
-                  <label className="block text-[11px] font-mono text-slate-400 mb-1 flex items-center gap-1.5">
-                    <Calendar className="w-3.5 h-3.5 text-cyan-400" />
-                    <span>Select Audit Date:</span>
-                  </label>
-                  <input
-                    type="date"
-                    value={selectedDate}
-                    onChange={(e) => setSelectedDate(e.target.value)}
-                    max={getTodayDateStr()}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-cyan-400"
-                  />
-                </div>
-
-                {/* Telemetry Record Counter */}
-                <div className="flex items-center justify-between text-[11px] font-mono text-slate-400 px-1">
-                  <span>Logged Records:</span>
-                  {isLoadingLogs ? (
-                    <span className="flex items-center gap-1 text-slate-500">
-                      <Loader2 className="w-3 h-3 animate-spin" /> Fetching...
-                    </span>
-                  ) : (
-                    <span className="text-cyan-400 font-semibold">
-                      {logCount !== null ? `${logCount} Events` : 'Ready'}
-                    </span>
-                  )}
+              {/* Fortress Entry Action */}
+              <div className="pt-5 mt-4 space-y-2 border-t border-slate-800/80">
+                <div className="text-[11px] font-mono text-slate-400 flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Requires SuperAdmin OTP &amp; Hardware Fingerprint</span>
                 </div>
 
                 <button
@@ -203,34 +138,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   title="Verify SuperAdmin Credentials & Contextual OTP to Export Audit Logs"
                 >
                   <Shield className="w-4 h-4" />
-                  <span>Fortress Preview & Export</span>
+                  <span>Fortress Preview &amp; Export</span>
                 </button>
               </div>
             </div>
           </div>
-
-          {/* Available Dates Quick-Pills */}
-          {availableDates.length > 0 && (
-            <div className="p-3 rounded-lg bg-slate-950/40 border border-slate-800/60 flex items-center gap-2 overflow-x-auto text-[11px] font-mono text-slate-400">
-              <span className="whitespace-nowrap text-slate-500">Available Dates:</span>
-              <div className="flex items-center gap-1.5">
-                {availableDates.slice(0, 5).map((d) => (
-                  <button
-                    key={d}
-                    type="button"
-                    onClick={() => setSelectedDate(d)}
-                    className={`px-2 py-0.5 rounded border transition-colors ${
-                      selectedDate === d
-                        ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300 font-semibold'
-                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
-                    }`}
-                  >
-                    {d}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Modal Footer */}
@@ -252,12 +164,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       <FortressAuditModal
         isOpen={showFortressModal}
         onClose={() => setShowFortressModal(false)}
-        onAuthorized={(sessionToken, username, trustScore) => {
+        onAuthorized={(sessionToken, username, trustScore, targetDate) => {
           setShowFortressModal(false);
           onClose();
-          onFortressAuthorized?.(sessionToken, username, trustScore);
+          onFortressAuthorized?.(sessionToken, username, trustScore, targetDate);
         }}
-        targetDate={selectedDate}
         backendUrl={backendUrl}
       />
     </div>

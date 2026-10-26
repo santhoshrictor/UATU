@@ -39,6 +39,7 @@ export interface AuditLogsPageProps {
   sessionToken: string;
   superadminUser: string;
   trustScore: number;
+  initialDate?: string;
   onBackToMultiview: () => void;
   backendUrl?: string;
 }
@@ -47,6 +48,7 @@ export const AuditLogsPage: React.FC<AuditLogsPageProps> = ({
   sessionToken,
   superadminUser,
   trustScore,
+  initialDate,
   onBackToMultiview,
   backendUrl = 'http://127.0.0.1:8000',
 }) => {
@@ -59,8 +61,15 @@ export const AuditLogsPage: React.FC<AuditLogsPageProps> = ({
   };
 
   // Filter States
-  const [startDate, setStartDate] = useState<string>(getTodayDateStr());
-  const [endDate, setEndDate] = useState<string>(getTodayDateStr());
+  const [startDate, setStartDate] = useState<string>(initialDate || getTodayDateStr());
+  const [endDate, setEndDate] = useState<string>(initialDate || getTodayDateStr());
+
+  useEffect(() => {
+    if (initialDate) {
+      setStartDate(initialDate);
+      setEndDate(initialDate);
+    }
+  }, [initialDate]);
   const [selectedEventType, setSelectedEventType] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [availableDates, setAvailableDates] = useState<string[]>([]);
