@@ -4,13 +4,12 @@ import {
   X,
   UserPlus,
   FileSpreadsheet,
-  Download,
   Calendar,
-  CheckCircle,
-  AlertCircle,
-  Loader2,
+  Shield,
   ShieldCheck,
+  Loader2,
 } from 'lucide-react';
+import { FortressAuditModal } from './FortressAuditModal';
 
 export interface SettingsModalProps {
   isOpen: boolean;
@@ -35,14 +34,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const [selectedDate, setSelectedDate] = useState<string>(getTodayDateStr());
+  const [showFortressModal, setShowFortressModal] = useState<boolean>(false);
   const [logCount, setLogCount] = useState<number | null>(null);
   const [availableDates, setAvailableDates] = useState<string[]>([]);
   const [isLoadingLogs, setIsLoadingLogs] = useState<boolean>(false);
-  const [isDownloading, setIsDownloading] = useState<boolean>(false);
-  const [downloadStatus, setDownloadStatus] = useState<{
-    type: 'success' | 'error';
-    message: string;
-  } | null>(null);
 
   // Close on Escape key
   useEffect(() => {
@@ -88,42 +83,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       isMounted = false;
     };
   }, [isOpen, selectedDate, backendUrl]);
-
-  // Trigger CSV Download
-  const handleExportCSV = async () => {
-    setIsDownloading(true);
-    setDownloadStatus(null);
-    try {
-      const exportUrl = `${backendUrl}/api/audit-logs/export?date=${encodeURIComponent(selectedDate)}`;
-      const res = await fetch(exportUrl);
-      if (!res.ok) {
-        throw new Error(`Server returned HTTP ${res.status}`);
-      }
-
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `audit_log_${selectedDate}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-
-      setDownloadStatus({
-        type: 'success',
-        message: `Successfully exported audit_log_${selectedDate}.csv`,
-      });
-    } catch (err: any) {
-      console.error('Audit log export error:', err);
-      setDownloadStatus({
-        type: 'error',
-        message: err.message || 'Failed to download audit log CSV.',
-      });
-    } finally {
-      setIsDownloading(false);
-    }
-  };
 
   if (!isOpen) return null;
 
@@ -237,16 +196,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                 <button
                   type="button"
-                  onClick={handleExportCSV}
-                  disabled={isDownloading}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 active:bg-cyan-700 disabled:opacity-50 text-slate-950 font-semibold text-xs uppercase tracking-wider font-mono transition-all shadow-lg shadow-cyan-950/40"
+                  onClick={() => setShowFortressModal(true)}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-slate-950 font-semibold text-xs uppercase tracking-wider font-mono transition-all shadow-lg shadow-amber-950/40"
+                  title="Verify SuperAdmin Credentials & Contextual OTP to Export Audit Logs"
                 >
-                  {isDownloading ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Download className="w-4 h-4" />
-                  )}
-                  <span>{isDownloading ? 'Generating CSV...' : 'Download CSV Log'}</span>
+                  <Shield className="w-4 h-4" />
+                  <span>Fortress Zero-Trust Export</span>
                 </button>
               </div>
             </div>
@@ -274,24 +229,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
             </div>
           )}
-
-          {/* Download Notification Status */}
-          {downloadStatus && (
-            <div
-              className={`p-3 rounded-lg border flex items-center gap-2 text-xs font-mono animate-in fade-in duration-200 ${
-                downloadStatus.type === 'success'
-                  ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-300'
-                  : 'bg-red-950/30 border-red-500/40 text-red-300'
-              }`}
-            >
-              {downloadStatus.type === 'success' ? (
-                <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
-              ) : (
-                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
-              )}
-              <span>{downloadStatus.message}</span>
-            </div>
-          )}
         </div>
 
         {/* Modal Footer */}
@@ -308,6 +245,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Fortress Zero-Trust Verification Modal */}
+      <FortressAuditModal
+        isOpen={showFortressModal}
+        onClose={() => setShowFortressModal(false)}
+        targetDate={selectedDate}
+        backendUrl={backendUrl}
+      />
     </div>
   );
 };

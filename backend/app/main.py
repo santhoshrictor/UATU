@@ -36,6 +36,7 @@ from backend.app.core.config import settings
 from backend.app.core.logging import logger
 from backend.app.core.websocket_manager import alert_manager
 from backend.app.audit_engine import audit_engine
+from backend.app.auth_fortress import fortress_engine
 from backend.app.live_event_store import live_event_store
 from backend.app.vision_engine import SpatialTracker
 
@@ -1051,6 +1052,222 @@ async def create_audit_log(payload: AuditLogCreateRequest):
         "status": "success",
         "record": record,
     }
+
+
+# =============================================================================
+# FORTRESS ZERO-TRUST SUPERADMIN AUTH & CONTEXTUAL OTP ENDPOINTS
+# =============================================================================
+
+
+class FortressCredentialsRequest(BaseModel):
+    username: str = Field(..., description="SuperAdmin username or email")
+    password: str = Field(..., description="SuperAdmin password")
+
+
+class FortressRequestOtpRequest(BaseModel):
+    ticket: str = Field(..., description="Pre-OTP session ticket")
+    timezone: Optional[str] = Field("Asia/Kolkata", description="Client browser timezone")
+    user_agent: Optional[str] = Field(None, description="Client User-Agent header")
+    accept_language: Optional[str] = Field(None, description="Client Accept-Language header")
+
+
+class FortressVerifyExportRequest(BaseModel):
+    session_id: str = Field(..., description="Fortress OTP session ID")
+    otp_code: str = Field(..., description="6-digit numeric OTP code")
+    date: Optional[str] = Field(None, description="Target audit date (YYYY-MM-DD)")
+    format: Optional[str] = Field("csv", description="Export format: 'csv' or 'jsonl'")
+    timezone: Optional[str] = Field("Asia/Kolkata", description="Client browser timezone")
+    user_agent: Optional[str] = Field(None, description="Client User-Agent header")
+    accept_language: Optional[str] = Field(None, description="Client Accept-Language header")
+    simulate_hacker: Optional[bool] = Field(False, description="Hackathon demo mode: artificially trigger Zero-Trust block")
+
+
+@app.post("/api/fortress/verify-credentials")
+async def fortress_verify_credentials(
+    payload: FortressCredentialsRequest,
+    request: Request,
+):
+    """
+    Authenticate SuperAdmin username and password before allowing OTP dispatch.
+    """
+    is_valid, err_msg, ticket_data = fortress_engine.verify_superadmin_credentials(
+        username_or_email=payload.username,
+        password=payload.password,
+    )
+
+    if not is_valid or not ticket_data:
+        audit_engine.log_event(
+            event_type="FORTRESS_CREDENTIAL_ATTEMPT",
+            camera_node="FORTRESS-AUTH",
+            details=f"Failed SuperAdmin credential attempt for user '{payload.username}'. Reason: {err_msg}",
+            operator_id=payload.username,
+            payload={"status": "FAILED", "username": payload.username, "error": err_msg},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=err_msg or "SuperAdmin authentication failed.",
+        )
+
+    audit_engine.log_event(
+        event_type="FORTRESS_CREDENTIAL_ATTEMPT",
+        camera_node="FORTRESS-AUTH",
+        details=f"SuperAdmin credentials successfully verified for '{ticket_data['username']}'. Pre-OTP session ticket issued.",
+        operator_id=ticket_data["username"],
+        payload={"status": "SUCCESS", "username": ticket_data["username"], "ticket": ticket_data["ticket"][:10] + "..."},
+    )
+
+    return {
+        "status": "success",
+        "message": "SuperAdmin credentials verified. You may now request a Fortress OTP.",
+        "ticket": ticket_data["ticket"],
+        "username": ticket_data["username"],
+        "display_name": ticket_data["display_name"],
+    }
+
+
+@app.post("/api/fortress/request-otp")
+async def fortress_request_otp(
+    payload: FortressRequestOtpRequest,
+    request: Request,
+):
+    """
+    Dispatch cryptographically bound 6-digit OTP tied to client IP/subnet and device fingerprint.
+    """
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    ua = payload.user_agent or request.headers.get("user-agent", "Unknown-Browser")
+    lang = payload.accept_language or request.headers.get("accept-language", "en-US")
+    tz = payload.timezone or "Asia/Kolkata"
+
+    success, err_msg, otp_data = fortress_engine.request_fortress_otp(
+        ticket=payload.ticket,
+        client_ip=client_ip,
+        user_agent=ua,
+        accept_language=lang,
+        timezone_str=tz,
+    )
+
+    if not success or not otp_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=err_msg or "Failed to dispatch Fortress OTP.",
+        )
+
+    audit_engine.log_event(
+        event_type="FORTRESS_OTP_REQUESTED",
+        camera_node="FORTRESS-AUTH",
+        details=f"Contextual 6-digit OTP dispatched to {otp_data['username']} [Session: {otp_data['session_id']}, Subnet: {otp_data['bound_subnet']}].",
+        operator_id=otp_data["username"],
+        payload=otp_data,
+    )
+
+    return {
+        "status": "success",
+        "message": f"Cryptographically bound OTP dispatched. Valid for {otp_data['expires_in_seconds']} seconds.",
+        "session_id": otp_data["session_id"],
+        "username": otp_data["username"],
+        "masked_otp": otp_data["masked_otp"],
+        "demo_otp_hint": otp_data["demo_otp_hint"],
+        "bound_subnet": otp_data["bound_subnet"],
+        "expires_in_seconds": otp_data["expires_in_seconds"],
+    }
+
+
+@app.post("/api/fortress/verify-and-export")
+async def fortress_verify_and_export(
+    payload: FortressVerifyExportRequest,
+    request: Request,
+    simulate_hacker: bool = False,
+):
+    """
+    Verify Fortress OTP and evaluate Trust Score against threshold (>= 80).
+    If authorized, returns downloadable audit log file (CSV or JSONL).
+    If Trust Score < 80 or simulate_hacker is true, raises HTTP 403 Forbidden with security block details.
+    """
+    import io
+
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    ua = payload.user_agent or request.headers.get("user-agent", "Unknown-Browser")
+    lang = payload.accept_language or request.headers.get("accept-language", "en-US")
+    tz = payload.timezone or "Asia/Kolkata"
+
+    # Support either query parameter ?simulate_hacker=true or JSON payload simulate_hacker
+    hacker_flag = simulate_hacker or bool(payload.simulate_hacker)
+
+    is_auth, trust_score, breakdown, err_msg, user_info = fortress_engine.verify_and_authorize_export(
+        session_id=payload.session_id,
+        presented_otp=payload.otp_code,
+        client_ip=client_ip,
+        user_agent=ua,
+        accept_language=lang,
+        timezone_str=tz,
+        simulate_hacker=hacker_flag,
+    )
+
+    if not is_auth:
+        audit_engine.log_event(
+            event_type="FORTRESS_BLOCKED_HACKER",
+            camera_node="FORTRESS-AUTH",
+            details=f"Fortress Zero-Trust BLOCKED export attempt (Trust Score: {trust_score}/100, Reason: {err_msg}).",
+            operator_id="UNTRUSTED_CLIENT",
+            payload={
+                "trust_score": trust_score,
+                "breakdown": breakdown,
+                "simulate_hacker": hacker_flag,
+                "error": err_msg,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "ZERO_TRUST_SECURITY_BLOCK",
+                "message": err_msg or "Fortress Zero-Trust security verification failed.",
+                "trust_score": trust_score,
+                "threshold": 80,
+                "breakdown": breakdown,
+            },
+        )
+
+    # Authorized! Determine target date and generate export
+    target_date = payload.date.strip() if payload.date and payload.date.strip() else datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
+    export_fmt = (payload.format or "csv").strip().lower()
+    username = user_info.get("username", "SuperAdmin") if user_info else "SuperAdmin"
+
+    audit_engine.log_event(
+        event_type="FORTRESS_EXPORT_AUTHORIZED",
+        camera_node="FORTRESS-AUTH",
+        details=f"Fortress Zero-Trust verified (Trust Score: {trust_score}/100) for '{username}'. Audit export [{export_fmt.upper()}] authorized.",
+        operator_id=username,
+        payload={
+            "trust_score": trust_score,
+            "target_date": target_date,
+            "format": export_fmt,
+            "breakdown": breakdown,
+        },
+    )
+
+    if export_fmt == "jsonl":
+        logs = audit_engine.get_logs_for_date(target_date)
+        jsonl_lines = [json.dumps(r, ensure_ascii=False) for r in logs]
+        content = "\n".join(jsonl_lines)
+        filename = f"uatu_runtime_audit_{target_date}.jsonl"
+        media_type = "application/x-ndjson"
+    else:
+        content = audit_engine.export_csv_for_date(target_date)
+        filename = f"audit_log_{target_date}.csv"
+        media_type = "text/csv"
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "X-Fortress-Trust-Score": str(trust_score),
+        "X-Fortress-Authorized-By": username,
+        "Access-Control-Expose-Headers": "Content-Disposition, X-Fortress-Trust-Score, X-Fortress-Authorized-By",
+    }
+
+    return StreamingResponse(
+        io.StringIO(content),
+        media_type=media_type,
+        headers=headers,
+    )
 
 
 
