@@ -1,0 +1,61 @@
+# Environments and Virtualenvs
+.venv/
+venv/
+ENV/
+env/
+
+# Dependencies & Build artifacts
+node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/.next-dev/
+dist/
+build/
+*.egg-info/
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+
+# Snapshots & Media (Keep directory structure with .gitkeep)
+snapshots/*.jpg
+snapshots/*.png
+snapshots/*.jpeg
+!snapshots/.gitkeep
+
+# Audit logs
+logs/
+logs/*.jsonl
+
+# Heavy Models & Binaries (>500MB)
+models/
+bin/
+
+# Environment configurations
+.env
+.env.*
+!.env.example
+!.env.offline
+
+# System & OS
+.DS_Store
+Thumbs.db
+
+# IDEs and Tools
+.idea/
+.vscode/
+KMS/
+.claude/settings.local.json
+.claude/worktrees/
+.codex/config.local.toml
+.gemini/history/
+.gemini/tmp/
+.gemini/google_accounts.json
+.gemini/installation_id
+.gemini/oauth_creds.json
+.cursor/chat/
+.cursor/rules/*.local.mdc
+.github/personal-instructions.md

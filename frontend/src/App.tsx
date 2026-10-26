@@ -10,7 +10,6 @@ import {
   CheckCircle2,
   XCircle,
   Clock,
-  Check,
   Settings,
   Maximize2,
   Minimize2,
@@ -20,16 +19,17 @@ import {
   Camera,
   Radio,
   X,
-  Plus
+  Plus,
 } from 'lucide-react';
 import { EnrollModal } from './components/EnrollModal';
+import { UATUVoiceAssistantLauncher } from './components/UATUVoiceAssistantLauncher';
+import { IncidentQueue, type IncidentAlert, type AlertSeverity } from './components/IncidentQueue';
 
 /* =========================================================================
    TYPE DEFINITIONS
    ========================================================================= */
 
 type AccessVerdict = 'AUTHORIZED' | 'MISMATCH' | 'TAILGATING';
-type AlertSeverity = 'CRITICAL' | 'WARNING' | 'INFO';
 type GridLayout = '1x1' | '2x2' | '3x3';
 type StreamSourceType = 'WEBCAM' | 'BACKEND_LOOP' | 'CUSTOM_UPLOAD' | 'STANDBY';
 
@@ -60,19 +60,6 @@ interface AccessEvent {
   readerId: string;
   timestamp: string;
   occupancyDetected: number;
-}
-
-interface IncidentAlert {
-  id: string;
-  timestamp: string;
-  zone: string;
-  camera?: string;
-  type: string;
-  severity: AlertSeverity;
-  detail: string;
-  acknowledged: boolean;
-  acknowledgedAt?: string;
-  eventRef?: string;
 }
 
 interface InfraStatus {
@@ -196,51 +183,20 @@ const INITIAL_CAMERAS: CameraChannel[] = [
 ];
 
 const INITIAL_ACCESS_EVENT: AccessEvent = {
-  id: 'ACC-10492',
-  badgeId: 'EMP-4092',
-  employeeName: 'Sandy',
-  department: 'Lead Admin // Infrastructure',
-  faceMatchScore: 0.962,
+  id: 'STANDBY',
+  badgeId: 'STANDBY',
+  employeeName: 'Awaiting Credential Scan',
+  department: 'Turnstile Access Lane',
+  faceMatchScore: 0.0,
   verdict: 'AUTHORIZED',
   zone: 'Zone 01 // Main Turnstile North',
   readerId: 'HID-SIGNO-40-A1',
-  timestamp: '12:20:00 UTC',
-  occupancyDetected: 1,
+  timestamp: '--:--:--',
+  occupancyDetected: 0,
 };
 
-const INITIAL_ALERTS: IncidentAlert[] = [
-  {
-    id: 'EVT-8921',
-    timestamp: '12:21:44 UTC',
-    zone: 'Zone 01 // Main Turnstile North',
-    type: 'TAILGATING DETECTED',
-    severity: 'CRITICAL',
-    detail: 'Physical breach: 2 persons traversed optical gate on single badge scan (EMP-4092).',
-    acknowledged: false,
-    eventRef: 'ACC-10488',
-  },
-  {
-    id: 'EVT-8919',
-    timestamp: '12:18:02 UTC',
-    zone: 'Zone 02 // Engineering Air-Lock',
-    type: 'FACE MISMATCH',
-    severity: 'WARNING',
-    detail: 'ArcFace verification mismatch: Scanned credential EMP-2810 returned 41.8% cosine match.',
-    acknowledged: false,
-    eventRef: 'ACC-10484',
-  },
-  {
-    id: 'EVT-8915',
-    timestamp: '12:05:30 UTC',
-    zone: 'Zone 04 // Server Room Alpha',
-    type: 'CREDENTIAL CHALLENGE',
-    severity: 'INFO',
-    detail: 'Routine keycard badge scan authenticated successfully with 97.4% biometric match.',
-    acknowledged: true,
-    acknowledgedAt: '12:06:12 UTC',
-    eventRef: 'ACC-10479',
-  },
-];
+// 100% Zero-Fake-Data: Clean empty initial alerts queue
+const INITIAL_ALERTS: IncidentAlert[] = [];
 
 /* =========================================================================
    MAIN COMMAND CENTER COMPONENT
@@ -280,10 +236,62 @@ export const App: React.FC = () => {
   const [streamErrors, setStreamErrors] = useState<Record<string, boolean>>({});
   const [reconnectTicks, setReconnectTicks] = useState<Record<string, number>>({});
 
-  // Access Control Simulation & Alert State
+  // Access Control Simulation & Alert State (Persists across page refreshes and navigation until manual reset)
   const [currentAccess, setCurrentAccess] = useState<AccessEvent>(INITIAL_ACCESS_EVENT);
-  const [alerts, setAlerts] = useState<IncidentAlert[]>(INITIAL_ALERTS);
+  const [alerts, setAlerts] = useState<IncidentAlert[]>(() => {
+    try {
+      const saved = localStorage.getItem('uatu_incident_queue');
+      if (saved !== null) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed;
+        }
+      }
+    } catch (err) {
+      console.warn('[UATU Alert Bridge] Error reading persisted alerts queue from localStorage:', err);
+    }
+    return INITIAL_ALERTS;
+  });
   const [alertFilter, setAlertFilter] = useState<'ALL' | 'UNACKNOWLEDGED'>('ALL');
+
+  // Keep localStorage continuously synchronized with alerts state
+  useEffect(() => {
+    try {
+      localStorage.setItem('uatu_incident_queue', JSON.stringify(alerts));
+    } catch (err) {
+      console.warn('[UATU Alert Bridge] Failed to persist alerts queue to localStorage:', err);
+    }
+  }, [alerts]);
+
+  // Synchronize Incident Dispatch Queue on initial mount with LiveEventStore
+  useEffect(() => {
+    const fetchLiveEvents = async () => {
+      try {
+        const res = await fetch('http://127.0.0.1:8000/api/live-events');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.events)) {
+            const mappedAlerts: IncidentAlert[] = data.events.map((ev: any) => ({
+              id: ev.event_id || ev.id,
+              time: ev.time || ev.timestamp_ist || '00:00:00 IST',
+              zone: ev.zone || 'Facility Zone',
+              camera: ev.camera_id || ev.camera || 'CAM-01',
+              type: ev.event_type || ev.type || 'SECURITY_ALERT',
+              level: (ev.alarm_class || ev.level || 'INFO').toUpperCase() as any,
+              detail: ev.detail || '',
+              snapshot_url: ev.snapshot_url || '',
+              acknowledged: Boolean(ev.acknowledged),
+              acknowledgedAt: ev.acknowledged_at_ist || undefined,
+            }));
+            setAlerts(mappedAlerts);
+          }
+        }
+      } catch (err) {
+        console.debug('[UATU Alert Bridge] Initial live events fetch notice:', err);
+      }
+    };
+    fetchLiveEvents();
+  }, []);
 
   // Live Biometric Personnel Enrollment Modal State
   const [showEnrollModal, setShowEnrollModal] = useState<boolean>(false);
@@ -388,6 +396,17 @@ export const App: React.FC = () => {
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
+            // Handle Spatial & Layout Control Commands (dispatched by IRIS voice assistant)
+            if (data && (data.action === 'LAYOUT_CHANGE' || data.type === 'UI_LAYOUT_COMMAND')) {
+              console.log('[UATU Spatial Control] Received layout command:', data);
+              if (data.layout && ['1x1', '2x2', '3x3'].includes(data.layout)) {
+                setGridLayout(data.layout as GridLayout);
+              }
+              if (data.camera_id) {
+                setFocusedCameraId(data.camera_id);
+              }
+              return;
+            }
             if (data && data.type) {
               const incomingAlert: IncidentAlert = {
                 id: data.id || `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
@@ -400,7 +419,16 @@ export const App: React.FC = () => {
                 acknowledged: false,
                 eventRef: data.id,
               };
-              setAlerts((prev) => [incomingAlert, ...prev]);
+              setAlerts((prev) => {
+                if (prev.some((a) => a.id === incomingAlert.id)) {
+                  return prev;
+                }
+                const updated = [incomingAlert, ...prev];
+                try {
+                  localStorage.setItem('uatu_incident_queue', JSON.stringify(updated));
+                } catch {}
+                return updated;
+              });
             }
           } catch (err) {
             console.error('[UATU Alert Bridge] Error parsing WebSocket message:', err);
@@ -821,9 +849,23 @@ export const App: React.FC = () => {
   };
 
   /* -----------------------------------------------------------------------
-     7. Alert Acknowledgment Toggle
+     7. Alert Acknowledgment Toggle & Manual Queue Reset
      ----------------------------------------------------------------------- */
-  const toggleAcknowledge = (id: string) => {
+  const handleResetAlerts = useCallback(() => {
+    try {
+      localStorage.setItem('uatu_incident_queue', JSON.stringify([]));
+      localStorage.setItem('uatu_alerts_reset_at', new Date().toISOString());
+    } catch (err) {
+      console.warn('[UATU Alert Bridge] Error persisting reset state to localStorage:', err);
+    }
+    setAlerts([]);
+    // Clear backend LiveEventStore
+    fetch('http://127.0.0.1:8000/api/live-events/clear', { method: 'POST' }).catch((err) => {
+      console.debug('[UATU Alert Bridge] Backend clear events notice:', err);
+    });
+  }, []);
+
+  const toggleAcknowledge = async (id: string) => {
     const ackTime = formatUtcTime();
     setAlerts((prev) =>
       prev.map((alert) => {
@@ -838,18 +880,22 @@ export const App: React.FC = () => {
         return alert;
       })
     );
+
+    // Synchronize alert acknowledgement with backend LiveEventStore
+    try {
+      await fetch(`http://127.0.0.1:8000/api/live-events/${encodeURIComponent(id)}/acknowledge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acknowledged_by: 'Dashboard_Supervisor' }),
+      });
+    } catch (err) {
+      console.debug('[UATU Alert Bridge] Backend acknowledge notice:', err);
+    }
   };
 
   const unacknowledgedCount = useMemo(() => {
     return alerts.filter((a) => !a.acknowledged).length;
   }, [alerts]);
-
-  const filteredAlerts = useMemo(() => {
-    if (alertFilter === 'UNACKNOWLEDGED') {
-      return alerts.filter((a) => !a.acknowledged);
-    }
-    return alerts;
-  }, [alerts, alertFilter]);
 
   const visibleCameras = useMemo(() => {
     if (gridLayout === '1x1') {
@@ -991,6 +1037,9 @@ export const App: React.FC = () => {
               <Settings className="w-3.5 h-3.5 text-emerald-400 group-hover:rotate-45 transition-transform duration-200" />
               <span className="hidden md:inline font-mono text-xs">Enroll</span>
             </button>
+
+            {/* IRIS AI Voice & Query Assistant Launcher */}
+            <UATUVoiceAssistantLauncher />
 
             {/* Live UTC Telemetry Clock */}
             <div className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded bg-slate-950 border border-slate-800 text-slate-400 font-mono text-[11px]">
@@ -1525,161 +1574,19 @@ export const App: React.FC = () => {
         </div>
 
         {/* ===================================================================
+        {/* ===================================================================
             RIGHT COLUMN (35% width: 4/12 columns on LG screens)
-            D. REAL-TIME ALERT DISPATCH QUEUE
+            D. REAL-TIME ALERT DISPATCH QUEUE (Persists across reload until manual reset)
             =================================================================== */}
         <div className="lg:col-span-4 flex flex-col">
-          <div className="bg-[#0f172a] rounded-lg border border-[#1e293b] shadow-xl flex flex-col h-full overflow-hidden">
-            {/* Header with Active Unacknowledged Count */}
-            <div className="p-4 bg-slate-900/90 border-b border-[#1e293b] flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5">
-                <AlertTriangle className="w-5 h-5 text-amber-400" />
-                <div>
-                  <h2 className="font-mono text-sm sm:text-base font-bold text-slate-100 tracking-wide uppercase">
-                    Incident Dispatch Queue
-                  </h2>
-                  <p className="text-[11px] text-slate-400 font-sans">
-                    Priority-coded real-time security events
-                  </p>
-                </div>
-              </div>
-
-              {/* Active unacknowledged count pill */}
-              <div
-                className={`px-2.5 py-1 rounded-full font-mono text-xs font-bold border ${
-                  unacknowledgedCount > 0
-                    ? 'bg-red-950/40 text-red-400 border-red-500/40 animate-pulse'
-                    : 'bg-emerald-950/40 text-emerald-400 border-emerald-500/40'
-                }`}
-              >
-                {unacknowledgedCount} ACTIVE
-              </div>
-            </div>
-
-            {/* Filter Sub-Bar */}
-            <div className="px-4 py-2 bg-slate-950/70 border-b border-slate-800 flex items-center justify-between text-xs font-mono">
-              <div className="flex items-center gap-1.5 text-slate-400">
-                <span>FILTER:</span>
-                <button
-                  onClick={() => setAlertFilter('ALL')}
-                  className={`px-2 py-0.5 rounded transition-colors ${
-                    alertFilter === 'ALL'
-                      ? 'bg-slate-800 text-white font-semibold'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  ALL ({alerts.length})
-                </button>
-                <button
-                  onClick={() => setAlertFilter('UNACKNOWLEDGED')}
-                  className={`px-2 py-0.5 rounded transition-colors ${
-                    alertFilter === 'UNACKNOWLEDGED'
-                      ? 'bg-slate-800 text-white font-semibold'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  UNACK ({unacknowledgedCount})
-                </button>
-              </div>
-
-              <span className="text-[10px] text-slate-500 uppercase tracking-wider">
-                AUTO-DISPATCH ON
-              </span>
-            </div>
-
-            {/* Scrollable Incident Cards List */}
-            <div className="p-4 flex-1 overflow-y-auto space-y-3.5 max-h-[750px]">
-              {filteredAlerts.length === 0 ? (
-                <div className="text-center py-12 text-slate-500 font-mono text-xs">
-                  <CheckCircle2 className="w-8 h-8 mx-auto mb-2 text-slate-600" />
-                  NO INCIDENTS IN CURRENT VIEW
-                </div>
-              ) : (
-                filteredAlerts.map((alert) => {
-                  const isCrit = alert.severity === 'CRITICAL';
-                  const isWarn = alert.severity === 'WARNING';
-
-                  return (
-                    <div
-                      key={alert.id}
-                      className={`rounded-lg border p-3.5 transition-all duration-200 ${
-                        alert.acknowledged
-                          ? 'bg-slate-950/40 border-slate-800/60 opacity-60'
-                          : isCrit
-                          ? 'bg-red-950/20 border-red-900/50 hover:border-red-700/60 shadow-lg shadow-red-950/10'
-                          : isWarn
-                          ? 'bg-amber-950/20 border-amber-900/50 hover:border-amber-700/60 shadow-lg shadow-amber-950/10'
-                          : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
-                      }`}
-                    >
-                      {/* Top Row: Severity, Event ID, Timestamp */}
-                      <div className="flex items-center justify-between gap-2 mb-2 font-mono text-xs">
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider uppercase ${
-                              isCrit
-                                ? 'bg-red-500/20 text-red-400 border border-red-500/30'
-                                : isWarn
-                                ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                                : 'bg-slate-800 text-slate-300 border border-slate-700'
-                            }`}
-                          >
-                            {alert.severity}
-                          </span>
-                          <span className="font-semibold text-slate-300">{alert.id}</span>
-                        </div>
-                        <span className="text-[11px] text-slate-400">{alert.timestamp}</span>
-                      </div>
-
-                      {/* Zone Identifier */}
-                      <div className="text-[11px] font-mono text-emerald-400/90 mb-1 flex items-center gap-1.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                        <span>{alert.camera ? `${alert.camera} • ${alert.zone}` : alert.zone}</span>
-                      </div>
-
-                      {/* Alert Type Heading */}
-                      <div className="text-xs sm:text-sm font-semibold text-slate-100 mb-1.5 font-mono">
-                        {alert.type}
-                      </div>
-
-                      {/* Detail Message */}
-                      <p className="text-xs text-slate-300 leading-relaxed font-sans mb-3">
-                        {alert.detail}
-                      </p>
-
-                      {/* Card Footer: Acknowledge Action Button */}
-                      <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-xs font-mono">
-                        <span className="text-[10px] text-slate-500">
-                          {alert.eventRef ? `REF: ${alert.eventRef}` : 'DISPATCH PROTOCOL'}
-                        </span>
-
-                        <button
-                          onClick={() => toggleAcknowledge(alert.id)}
-                          className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-mono font-medium transition-all ${
-                            alert.acknowledged
-                              ? 'bg-emerald-950/40 text-emerald-400 border border-emerald-500/30 hover:bg-slate-800'
-                              : 'bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 hover:border-slate-500'
-                          }`}
-                        >
-                          {alert.acknowledged ? (
-                            <>
-                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                              <span>Acknowledged</span>
-                            </>
-                          ) : (
-                            <>
-                              <Check className="w-3.5 h-3.5 text-slate-400" />
-                              <span>Acknowledge</span>
-                            </>
-                          )}
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </div>
+          <IncidentQueue
+            alerts={alerts}
+            unacknowledgedCount={unacknowledgedCount}
+            alertFilter={alertFilter}
+            onFilterChange={setAlertFilter}
+            onToggleAcknowledge={toggleAcknowledge}
+            onResetAlerts={handleResetAlerts}
+          />
         </div>
       </main>
 

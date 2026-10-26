@@ -2,6 +2,10 @@
 frontend/node_modules/
 frontend/dist/
 .env
+.env.*
+.env*.local
+!.env.example
+!**/.env.example
 
 # Backend
 backend/venv/
@@ -24,3 +28,22 @@ backend/models/
 *.onnx
 *.pt
 *.pkl
+*.gguf
+
+# Voice Agent (IRIS AI)
+voice_agent/frontend/node_modules/
+voice_agent/frontend/.next/
+voice_agent/frontend/.next-dev/
+voice_agent/models/
+voice_agent/bin/
+voice_agent/.venv/
+voice_agent/logs/
+voice_agent/snapshots/*
+!voice_agent/snapshots/.gitkeep
+
+# Snapshots & Live Event Storage
+iris/
+backend/snapshots/*
+!backend/snapshots/.gitkeep
+backend/data/*
+!backend/data/.gitkeep

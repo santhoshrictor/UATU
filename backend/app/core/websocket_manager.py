@@ -52,12 +52,44 @@ class AlertConnectionManager:
             return
 
         # Circuit Breaker: Kill event dispatch for offline, unassigned, or invalid camera streams
-        cam = message.get("camera")
-        if not cam or not self.is_stream_active(cam):
+        # Note: Access control events, biometric enrollments, and layout commands bypass stream status check
+        cam = message.get("camera") or message.get("camera_id")
+        msg_type = str(message.get("type", "")).upper()
+        is_exempt = (
+            str(cam).startswith("CAM-DEV")
+            or "PERSONNEL" in msg_type
+            or "ACCESS" in msg_type
+            or "MISMATCH" in msg_type
+            or "TAILGATING" in msg_type
+            or "ENROLL" in msg_type
+            or "LAYOUT" in msg_type
+        )
+
+        if cam and not is_exempt and not self.is_stream_active(cam):
             logger.warning(
                 f"Circuit Breaker: Alert {message.get('id')} suppressed because {cam} is OFFLINE / UNASSIGNED."
             )
             return
+
+        # Auto-record in LiveEventStore if not already recorded
+        try:
+            from backend.app.live_event_store import live_event_store
+            event_id = message.get("id") or message.get("event_id")
+            if event_id:
+                existing = live_event_store.get_live_events(limit=50)
+                if not any(e.get("event_id") == event_id or e.get("id") == event_id for e in existing):
+                    live_event_store.record_live_event(
+                        event_id=event_id,
+                        event_type=message.get("type") or message.get("event_type") or "SECURITY_ALERT",
+                        camera_id=cam or "CAM-01",
+                        zone=message.get("zone", "Facility Zone"),
+                        alarm_class=message.get("level") or message.get("severity") or "INFO",
+                        detail=message.get("detail") or message.get("message") or "",
+                        snapshot_url=message.get("snapshot_url"),
+                        metadata=message.get("metadata", {}),
+                    )
+        except Exception as ex:
+            logger.debug(f"LiveEventStore auto-record in broadcast failed: {ex}")
 
         payload = json.dumps(message)
         dead_connections = []
@@ -73,11 +105,40 @@ class AlertConnectionManager:
     def broadcast_sync(self, message: Dict[str, Any]):
         """Thread-safe synchronous broadcast dispatchable from background worker threads."""
         if not self.active_connections:
+            # Even if no WebSocket clients connected, auto-record alert into live_event_store
+            try:
+                from backend.app.live_event_store import live_event_store
+                event_id = message.get("id") or message.get("event_id")
+                cam = message.get("camera") or message.get("camera_id")
+                if event_id:
+                    existing = live_event_store.get_live_events(limit=50)
+                    if not any(e.get("event_id") == event_id or e.get("id") == event_id for e in existing):
+                        live_event_store.record_live_event(
+                            event_id=event_id,
+                            event_type=message.get("type") or message.get("event_type") or "SECURITY_ALERT",
+                            camera_id=cam or "CAM-01",
+                            zone=message.get("zone", "Facility Zone"),
+                            alarm_class=message.get("level") or message.get("severity") or "INFO",
+                            detail=message.get("detail") or message.get("message") or "",
+                            snapshot_url=message.get("snapshot_url"),
+                            metadata=message.get("metadata", {}),
+                        )
+            except Exception as ex:
+                logger.debug(f"LiveEventStore sync record failed: {ex}")
             return
 
-        # Circuit Breaker: Kill event dispatch for offline, unassigned, or invalid camera streams
-        cam = message.get("camera")
-        if not cam or not self.is_stream_active(cam):
+        cam = message.get("camera") or message.get("camera_id")
+        msg_type = str(message.get("type", "")).upper()
+        is_exempt = (
+            str(cam).startswith("CAM-DEV")
+            or "PERSONNEL" in msg_type
+            or "ACCESS" in msg_type
+            or "MISMATCH" in msg_type
+            or "TAILGATING" in msg_type
+            or "ENROLL" in msg_type
+            or "LAYOUT" in msg_type
+        )
+        if cam and not is_exempt and not self.is_stream_active(cam):
             logger.warning(
                 f"Circuit Breaker: Alert {message.get('id')} suppressed because {cam} is OFFLINE / UNASSIGNED."
             )
@@ -95,6 +156,38 @@ class AlertConnectionManager:
                     asyncio.run(self.broadcast(message))
         except Exception as e:
             logger.error(f"Error in AlertConnectionManager.broadcast_sync: {e}")
+
+    async def broadcast_control_command(self, message: Dict[str, Any]):
+        """Broadcast UI control, layout change, or system operational commands without camera circuit breaker."""
+        if not self.active_connections:
+            return
+        payload = json.dumps(message)
+        dead_connections = []
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(payload)
+            except Exception as e:
+                logger.warning(f"Error transmitting control command to WebSocket client: {e}")
+                dead_connections.append(connection)
+        for dead in dead_connections:
+            self.disconnect(dead)
+
+    def broadcast_control_sync(self, message: Dict[str, Any]):
+        """Thread-safe synchronous control command broadcast dispatchable from background worker threads."""
+        if not self.active_connections:
+            return
+        try:
+            loop = self._loop
+            if loop and loop.is_running():
+                asyncio.run_coroutine_threadsafe(self.broadcast_control_command(message), loop)
+            else:
+                try:
+                    cur_loop = asyncio.get_running_loop()
+                    cur_loop.create_task(self.broadcast_control_command(message))
+                except RuntimeError:
+                    asyncio.run(self.broadcast_control_command(message))
+        except Exception as e:
+            logger.error(f"Error in broadcast_control_sync: {e}")
 
 
 alert_manager = AlertConnectionManager()
