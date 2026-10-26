@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { AccessToken, type AccessTokenOptions, type VideoGrant } from 'livekit-server-sdk';
-import { RoomConfiguration } from '@livekit/protocol';
+import { RoomConfiguration, RoomAgentDispatch } from '@livekit/protocol';
 import { sameOrigin } from '@/lib/local-origin';
 
 type ConnectionDetails = {
@@ -51,6 +51,16 @@ export async function POST(req: Request) {
           ignoreUnknownFields: true,
         })
       : new RoomConfiguration();
+
+    // Ensure the LiveKit Agent worker (iris) is explicitly requested for dispatch
+    const agentName = process.env.AGENT_NAME || 'iris';
+    if (!roomConfig.agents || roomConfig.agents.length === 0) {
+      roomConfig.agents = [
+        new RoomAgentDispatch({
+          agentName: agentName,
+        }),
+      ];
+    }
 
     // Generate participant token
     const participantName = 'user';

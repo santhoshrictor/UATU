@@ -1,7 +1,7 @@
 @echo off
 title UATU / IRIS AI - Master Launcher
 echo ====================================================================
-echo       INITIALIZING UATU VOICE & QUERY DECISION-SUPPORT CENTER
+echo       INITIALIZING UATU VOICE ^& QUERY DECISION-SUPPORT CENTER
 echo ====================================================================
 echo.
 
@@ -9,10 +9,10 @@ echo.
 set "PROJECT_ROOT=%~dp0"
 
 :: Configure local python/uv environment
-if exist "%PROJECT_ROOT%\.venv\Scripts\uv.exe" (
-    set "AGENT_CMD="%PROJECT_ROOT%\.venv\Scripts\uv.exe" run python src\agent.py dev"
-) else if exist "%PROJECT_ROOT%\.venv\Scripts\python.exe" (
+if exist "%PROJECT_ROOT%\.venv\Scripts\python.exe" (
     set "AGENT_CMD="%PROJECT_ROOT%\.venv\Scripts\python.exe" src\agent.py dev"
+) else if exist "%PROJECT_ROOT%\.venv\Scripts\uv.exe" (
+    set "AGENT_CMD="%PROJECT_ROOT%\.venv\Scripts\uv.exe" run python src\agent.py dev"
 ) else (
     set "AGENT_CMD=uv run python src\agent.py dev"
 )
@@ -30,12 +30,12 @@ echo [3/3] Waiting for frontend server to bind to port 3000...
 powershell -NoProfile -Command "for ($i=0; $i -lt 15; $i++) { try { $res = Invoke-WebRequest -Uri 'http://localhost:3000' -UseBasicParsing -TimeoutSec 1; if ($res.StatusCode -eq 200) { break } } catch {} Start-Sleep -Seconds 1 }"
 
 echo.
-echo [OK] Opening IRIS / UATU Command Center in your default browser...
-start http://localhost:3000
+echo [OK] Opening UATU Video Intelligence & IRIS AI Dashboard...
+start http://localhost:5173
 
 echo.
 echo ====================================================================
-echo   UATU VOICE & SEARCH ASSISTANT IS ONLINE!
+echo   UATU VOICE ^& SEARCH ASSISTANT IS ONLINE!
 echo   HUD Frontend: http://localhost:3000
 echo   FastAPI UATU Backend: http://127.0.0.1:8000
 echo   To shut down cleanly, double-click 'stop_iris.bat'.
