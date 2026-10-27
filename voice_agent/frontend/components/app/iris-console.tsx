@@ -1,23 +1,20 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import Link from 'next/link';
 import {
   Camera,
   CircleHelp,
   Copy,
-  Cpu,
   Languages,
-  Layers,
+  MessageSquare,
   Mic,
+  MicOff,
   Monitor,
-  Pause,
-  Play,
-  Power,
   RotateCcw,
   Search,
+  Send,
   ShieldAlert,
-  ShieldCheck,
   Sparkles,
   X,
 } from 'lucide-react';
@@ -37,44 +34,44 @@ import { LiveIrisReactor } from '@/components/app/iris-reactor';
 
 const PHASES: Record<string, { label: string; detail: string }> = {
   standby: {
-    label: 'UATU Surveillance Intelligence Online',
-    detail: 'On-premise edge AI ready for multi-camera video intelligence & safety queries.',
+    label: 'IRIS AI Multi-Lingual Ready',
+    detail: 'Voice & decision-support online. English, Tamil, and Tanglish active.',
+  },
+  ready: {
+    label: 'IRIS AI Multi-Lingual Ready',
+    detail: 'Voice & decision-support online. English, Tamil, and Tanglish active.',
   },
   connecting: {
-    label: 'Establishing Secure Telemetry',
-    detail: 'Initializing local edge inference, audio pipelines, and WebRTC streaming.',
+    label: 'IRIS AI Connecting...',
+    detail: 'Voice & query engine online. Connecting background audio channel.',
   },
   initializing: {
-    label: 'UATU Engine Syncing',
-    detail: 'Connecting to CAM-01..CAM-09 camera channels and local indexed seed store.',
+    label: 'IRIS AI Multi-Lingual Ready',
+    detail: 'Real-time multi-camera channels and alert registers online.',
   },
   listening: {
-    label: 'Listening to Operator Voice',
-    detail: 'Speak in English, Tamil, or Tanglish. Real-time workplace intelligence active.',
+    label: 'Listening (English / தமிழ் / Tanglish)...',
+    detail: 'Speak naturally in English or Tamil. Interrupt anytime.',
   },
   thinking: {
-    label: 'Analyzing Video Events & Telemetry',
-    detail: 'Cross-referencing camera feeds, turnstiles, and safety alert registers.',
+    label: 'Analyzing Video Feeds & Registers...',
+    detail: 'Cross-referencing camera streams and anomaly logs.',
   },
   speaking: {
-    label: 'UATU Synthesizing Evidence Brief',
-    detail: 'Streaming evidence-backed response. Interrupt anytime to refine query.',
+    label: 'IRIS Responding...',
+    detail: 'Streaming verified evidence brief.',
   },
   idle: {
-    label: 'UATU Voice Ready',
-    detail: 'Standing by for workplace safety, perimeter, and access investigation queries.',
-  },
-  'pre-connect-buffering': {
-    label: 'Buffering Telemetry',
-    detail: 'Preparing ultra-low-latency real-time voice pipeline.',
+    label: 'IRIS AI Multi-Lingual Ready',
+    detail: 'Standing by for live video intelligence and safety queries.',
   },
   failed: {
-    label: 'Connection Interrupted',
-    detail: 'Re-authenticate or verify local LiveKit / FastAPI backend server status.',
+    label: 'IRIS AI (Direct Query Active)',
+    detail: 'Direct database & camera queries are available below.',
   },
   disconnected: {
-    label: 'Awaiting Operator Session',
-    detail: 'Click connect to initiate authenticated AI voice investigation.',
+    label: 'IRIS AI Multi-Lingual Ready',
+    detail: 'Voice & decision-support online. Speak or type below.',
   },
 };
 
@@ -82,34 +79,32 @@ interface QuickPrompt {
   id: string;
   tag: string;
   query: string;
+  targetCamera?: string;
 }
 
 const QUICK_PROMPTS: QuickPrompt[] = [
   {
-    id: 'qp-1',
-    tag: 'STORES / ACCESS AUDIT',
+    id: 'qp-cam2',
+    tag: 'CAM-02 // WORKSHOP (EN)',
+    query: 'Focus on Camera 02 and inspect Workshop Floor Alpha for PPE compliance.',
+    targetCamera: 'CAM-02',
+  },
+  {
+    id: 'qp-cam5',
+    tag: 'CAM-05 // TEA POINT (TANGLISH)',
+    query: 'CAM-05 Tea Point la live dwell timer status enna? Break overstay alert irukka?',
+    targetCamera: 'CAM-05',
+  },
+  {
+    id: 'qp-turnstile',
+    tag: 'STORES // ACCESS (TAMIL/TANGLISH)',
     query:
-      'Show all after-hours entries into Stores 2 last Friday and identify unmatched access-card events.',
+      'Stores 2-la night shift la unauthorized entry yaaru pannanga? Unmatched card events check pannu.',
   },
   {
-    id: 'qp-2',
-    tag: 'CANTEEN / OVERSTAY',
-    query: 'Show employees in the canteen for more than 45 minutes yesterday.',
-  },
-  {
-    id: 'qp-3',
-    tag: 'TOOL ROOM / ASSET AUDIT',
-    query: 'Find the video when the welding machine was removed from Tool Room.',
-  },
-  {
-    id: 'qp-4',
-    tag: 'SAFETY / CRITICAL ALERTS',
-    query: 'Show all critical fire, smoke, or worker fall alerts today.',
-  },
-  {
-    id: 'qp-5',
-    tag: 'INFRASTRUCTURE / STORAGE',
-    query: 'Check camera health, FPS status, and 30-day storage capacity.',
+    id: 'qp-alerts',
+    tag: 'ALERTS // CRITICAL (EN/TA)',
+    query: 'Show all critical fire, smoke, and worker fall alerts from the database today.',
   },
 ];
 
@@ -117,23 +112,61 @@ export function IrisConsole({ appConfig }: { appConfig: AppConfig }) {
   const session = useSessionContext();
   const { state: agentState } = useVoiceAssistant();
   const { messages } = useSessionMessages(session);
-  const { isCameraEnabled, isScreenShareEnabled } = useLocalParticipant();
+  const { localParticipant, isCameraEnabled, isScreenShareEnabled, isMicrophoneEnabled } =
+    useLocalParticipant();
   const { send } = useChat();
 
   const [isStarting, setIsStarting] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
-  const [motionPaused, setMotionPaused] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [connectionError, setConnectionError] = useState('');
   const [activePromptId, setActivePromptId] = useState<string | null>(null);
+  const [customQuery, setCustomQuery] = useState('');
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
 
-  const phase =
-    isStarting || session.connectionState === 'connecting'
-      ? 'connecting'
-      : !session.isConnected
-        ? 'standby'
-        : agentState;
-  const status = PHASES[phase] ?? PHASES.idle;
+  // Auto-connect instantly on mount to eliminate artificial "click to connect" and telemetry waiting lag
+  useEffect(() => {
+    let unmounted = false;
+    const autoInit = async () => {
+      if (!session.isConnected && !isStarting && session.connectionState === 'disconnected') {
+        setIsStarting(true);
+        try {
+          await session.start();
+        } catch {
+          if (!unmounted) {
+            console.warn('Voice WebRTC auto-connect deferred; direct query mode active.');
+          }
+        } finally {
+          if (!unmounted) setIsStarting(false);
+        }
+      }
+    };
+    void autoInit();
+    return () => {
+      unmounted = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Automatic background reconnect with backoff if network jitter causes disconnect
+  useEffect(() => {
+    if (session.isConnected) {
+      setReconnectAttempts(0);
+      return;
+    }
+    if (session.connectionState === 'disconnected' && !isStarting && reconnectAttempts < 3) {
+      const timer = setTimeout(() => {
+        setReconnectAttempts((prev) => prev + 1);
+        void startCall();
+      }, 3000);
+      return () => clearTimeout(timer);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.connectionState, session.isConnected, isStarting, reconnectAttempts]);
+
+  // Responsive phase without blocking artificial loading state
+  const phase = session.isConnected ? agentState : 'ready';
+  const status = PHASES[phase] ?? PHASES.ready;
   const video = isScreenShareEnabled
     ? session.local.screenShareTrack
     : isCameraEnabled
@@ -159,20 +192,9 @@ export function IrisConsole({ appConfig }: { appConfig: AppConfig }) {
     try {
       await session.start();
     } catch {
-      setConnectionError(
-        'Could not start UATU session. Check microphone permissions and confirm livekit-server and agent are running.'
-      );
+      setConnectionError('Voice link connection notice: Direct queries remain active.');
     } finally {
       setIsStarting(false);
-    }
-  }
-
-  async function endCall() {
-    setIsChatOpen(false);
-    try {
-      await session.end();
-    } catch {
-      setConnectionError('Could not disconnect cleanly. Please refresh the page.');
     }
   }
 
@@ -184,18 +206,90 @@ export function IrisConsole({ appConfig }: { appConfig: AppConfig }) {
     try {
       await session.end();
       await session.start();
+      toast.success('IRIS AI voice session refreshed');
     } catch {
-      setConnectionError('Could not restart. End session and connect again.');
+      setConnectionError('Direct query mode active.');
     } finally {
       setIsStarting(false);
     }
   }
 
+  // Handle programmatically switching camera feeds via postMessage and backend layout broadcast
+  const switchCameraFocus = async (camId: string) => {
+    if (typeof window !== 'undefined' && window.parent) {
+      window.parent.postMessage({ type: 'FOCUS_CAMERA', cameraId: camId }, '*');
+    }
+    try {
+      await fetch('http://127.0.0.1:8000/api/ui/layout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ layout: '1x1', camera_id: camId }),
+      });
+    } catch {
+      // Ignored if backend layout is unreachable; parent postMessage already fired
+    }
+    toast.success(`Switched focus to ${camId}`);
+  };
+
+  const fallbackDirectQuery = async (queryText: string) => {
+    setIsChatOpen(true);
+    // Multi-lingual parsing (English, Tamil, and Tanglish keywords)
+    const isAlertQuery = /alert|incident|fire|smoke|fall|hazard|neruppu|thee|abaththu|kollai/i.test(
+      queryText
+    );
+    const isCameraQuery = /camera|cam|paaru|focus|kaatu/i.test(queryText);
+    const isAccessQuery = /stores|entry|exit|turnstile|yaaru|card|unmatched|after-hours/i.test(
+      queryText
+    );
+    const isTeaPointQuery = /tea|dwell|break|overstay|canteen/i.test(queryText);
+
+    if (isCameraQuery) {
+      const match = queryText.match(/(?:camera|cam)\s*0?([1-9])/i);
+      if (match && match[1]) {
+        void switchCameraFocus(`CAM-0${match[1]}`);
+      }
+    }
+
+    if (isTeaPointQuery) {
+      try {
+        const res = await fetch('http://127.0.0.1:8000/api/tea-point/status');
+        if (res.ok) {
+          const tp = await res.json();
+          toast.success('CAM-05 Tea Point Live Telemetry', {
+            description: `Occupancy: ${tp.current_occupancy ?? 0} | Status: ${tp.active_status || 'NOMINAL'}`,
+          });
+          return;
+        }
+      } catch {}
+    }
+
+    if (isAlertQuery || isAccessQuery) {
+      try {
+        const res = await fetch('http://127.0.0.1:8000/api/live-events?limit=5');
+        if (res.ok) {
+          const events = await res.json();
+          toast.success(`Queried live database: ${events.length} records retrieved`, {
+            description:
+              events.length > 0
+                ? `${events[0].type || 'Alert'} (${events[0].camera_id || 'CAM-01'})`
+                : 'All zones nominal',
+          });
+          return;
+        }
+      } catch {}
+    }
+
+    toast.info('Query registered', { description: queryText });
+  };
+
   async function handleQuickPrompt(prompt: QuickPrompt) {
     setActivePromptId(prompt.id);
     setTimeout(() => setActivePromptId(null), 1500);
 
-    // Always copy to clipboard for operator convenience
+    if (prompt.targetCamera) {
+      void switchCameraFocus(prompt.targetCamera);
+    }
+
     if (typeof navigator !== 'undefined' && navigator.clipboard) {
       try {
         await navigator.clipboard.writeText(prompt.query);
@@ -206,173 +300,202 @@ export function IrisConsole({ appConfig }: { appConfig: AppConfig }) {
       try {
         await send(prompt.query);
         setIsChatOpen(true);
-        toast.success('Query transmitted to UATU agent', {
-          description: `"${prompt.query.slice(0, 55)}..."`,
+        toast.success('Query transmitted to IRIS AI', {
+          description: `"${prompt.query.slice(0, 50)}..."`,
         });
       } catch (err) {
         console.error('Failed to send prompt:', err);
-        toast.error('Failed to transmit query. Copied to clipboard.');
+        void fallbackDirectQuery(prompt.query);
       }
     } else {
-      toast.info('Query copied to clipboard', {
-        description: 'Connect to UATU Voice AI to speak or submit this query automatically.',
-      });
+      void fallbackDirectQuery(prompt.query);
     }
   }
 
+  const handleCustomQuerySubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    const q = customQuery.trim();
+    if (!q) return;
+    setCustomQuery('');
+
+    // Check if query asks to view or focus a specific camera
+    const camMatch = q.match(/(?:camera|cam)\s*0?([1-9])/i);
+    if (camMatch && camMatch[1]) {
+      const camId = `CAM-0${camMatch[1]}`;
+      void switchCameraFocus(camId);
+    }
+
+    if (session.isConnected) {
+      try {
+        await send(q);
+        setIsChatOpen(true);
+        toast.success('Transmitted query to IRIS AI');
+      } catch {
+        void fallbackDirectQuery(q);
+      }
+    } else {
+      void fallbackDirectQuery(q);
+    }
+  };
+
+  const isMicActive = session.isConnected && isMicrophoneEnabled;
+
   return (
-    <div
-      className="iris-console"
-      data-phase={phase}
-      data-chat={isChatOpen ? 'open' : 'closed'}
-      data-motion={motionPaused ? 'paused' : 'running'}
-    >
+    <div className="iris-console" data-phase={phase} data-chat={isChatOpen ? 'open' : 'closed'}>
       <div className="iris-console__texture" aria-hidden="true" />
 
-      {/* Top Industrial Surveillance Header */}
+      {/* Streamlined Modern Header with Multi-Lingual Engine Status */}
       <header className="iris-header">
-        <Link className="iris-brand" href="/" aria-label="UATU Home">
-          <span className="iris-brand__mark">
-            <ShieldCheck size={24} strokeWidth={1.8} className="text-emerald-400" />
-          </span>
-          <span>
-            <strong>
-              UATU<span className="iris-brand__period">.</span>
-            </strong>
-            <small>EDGE AI VOICE & SEARCH ASSISTANT</small>
-            <span className="iris-brand__subtitle">
-              On-Premise Evidence-Grounded Video Intelligence • English & Tamil/Tanglish
-            </span>
-          </span>
+        <Link className="iris-brand" href="/" aria-label="IRIS Home">
+          <div className="flex items-center gap-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-full border border-blue-500/30 bg-blue-600/20 text-blue-400">
+              <Sparkles size={16} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-sm font-bold tracking-wider text-slate-100">
+                  IRIS AI
+                </span>
+                <span className="flex items-center gap-1 rounded border border-blue-500/20 bg-blue-500/10 px-1.5 py-0.5 font-mono text-[10px] font-medium text-blue-400">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-400" />
+                  ONLINE
+                </span>
+                {/* Multi-Lingual Engine Indicator */}
+                <span
+                  className="hidden items-center gap-1 rounded border border-emerald-500/25 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[9px] font-medium tracking-wide text-emerald-400 sm:inline-flex"
+                  title="Multi-Lingual Engine: Full support for English, Tamil, and Tanglish Code-Switching"
+                >
+                  <Languages size={10} /> EN • தமிழ் • TANGLISH
+                </span>
+              </div>
+              <p className="font-sans text-[11px] text-slate-400">
+                Voice &amp; Multi-Camera Intelligence • Bilingual Engine
+              </p>
+            </div>
+          </div>
         </Link>
 
+        {/* Core Priority Controls: Microphone, Chat Transcript, Refresh */}
         <div className="iris-header__right">
-          <div className="uatu-header-tags hidden items-center gap-2 lg:flex">
-            <span className="uatu-chip uatu-chip--mode">
-              <Cpu size={11} /> ON-PREMISE EDGE AI // HITL VERIFIED
-            </span>
-            <span className="uatu-chip uatu-chip--scope">
-              <Layers size={11} /> CAM-01..CAM-09
-            </span>
-            <span className="uatu-chip uatu-chip--lang">
-              <Languages size={11} /> EN / TA / TANGLISH
-            </span>
-          </div>
-
-          <span className={`iris-connection ${session.isConnected ? 'is-live' : ''}`}>
-            <i />
-            {session.isConnected ? 'SESSION CONNECTED' : isStarting ? 'CONNECTING' : 'STANDBY'}
-          </span>
-          <span className="iris-header__divider" />
-          {session.isConnected && (
+          {session.isConnected ? (
             <button
-              className="iris-icon-button"
-              onClick={() => void restartCall()}
-              disabled={isStarting}
-              aria-label="Restart conversation"
-              title="Restart session with fresh context"
+              type="button"
+              className={`iris-icon-button ${
+                isMicActive
+                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                  : 'bg-amber-500/10 text-amber-400'
+              }`}
+              onClick={() => void localParticipant?.setMicrophoneEnabled(!isMicrophoneEnabled)}
+              title={isMicActive ? 'Mute Microphone (Voice Priority Active)' : 'Unmute Microphone'}
+              aria-label="Toggle Microphone"
             >
-              <RotateCcw size={15} />
+              {isMicActive ? <Mic size={15} /> : <MicOff size={15} />}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="iris-icon-button text-blue-400 hover:text-blue-300"
+              onClick={() => void startCall()}
+              disabled={isStarting}
+              title="Activate Instant Voice Link"
+              aria-label="Activate Voice Link"
+            >
+              <Mic size={15} />
             </button>
           )}
+
           <button
-            className="iris-icon-button"
-            onClick={() => setMotionPaused(!motionPaused)}
-            aria-label={motionPaused ? 'Resume animation' : 'Pause animation'}
-            title={motionPaused ? 'Resume animation' : 'Pause animation'}
+            type="button"
+            className={`iris-icon-button ${
+              isChatOpen ? 'border-blue-500/30 bg-blue-500/10 text-blue-400' : 'text-slate-400'
+            }`}
+            onClick={() => setIsChatOpen(!isChatOpen)}
+            title="Toggle Query Transcript"
+            aria-label="Toggle Conversation"
           >
-            {motionPaused ? <Play size={15} /> : <Pause size={15} />}
+            <MessageSquare size={15} />
           </button>
+
           <button
+            type="button"
+            className="iris-icon-button"
+            onClick={() => void restartCall()}
+            disabled={isStarting}
+            aria-label="Fresh Session"
+            title="Restart Session with Fresh Context"
+          >
+            <RotateCcw size={14} />
+          </button>
+
+          <button
+            type="button"
             className="iris-icon-button"
             onClick={() => setHelpOpen(!helpOpen)}
-            aria-label="How to use UATU"
-            aria-expanded={helpOpen}
+            aria-label="How to use IRIS"
+            title="Operator Guide"
           >
-            <CircleHelp size={17} />
+            <CircleHelp size={15} />
           </button>
         </div>
       </header>
 
-      {/* HUD Operational Status Bar */}
-      <div className="uatu-hud-status-bar">
-        <div className="uatu-hud-badge">
-          <span className="uatu-hud-label">SYSTEM MODE</span>
-          <strong className="text-emerald-400">
-            ON-PREMISE EDGE AI // HUMAN-IN-THE-LOOP VERIFIED
-          </strong>
-        </div>
-        <div className="uatu-hud-badge">
-          <span className="uatu-hud-label">CAMERA MATRIX SCOPE</span>
-          <strong className="text-slate-200">CAM-01..CAM-09 (9 Zones Indexed)</strong>
-        </div>
-        <div className="uatu-hud-badge">
-          <span className="uatu-hud-label">LANGUAGE ENGINE</span>
-          <strong className="text-emerald-400">EN / TA / TANGLISH ACTIVE</strong>
-        </div>
-      </div>
-
       <main className="iris-workspace" id="main-content">
-        <section className="iris-center" aria-label="UATU voice interface">
-          <div className="iris-reactor-caption">
-            <span className="iris-tiny-cross">+</span> MULTI-CAMERA VOICE INTELLIGENCE{' '}
-            <span className="iris-caption-line" /> <span>UATU / SURVEILLANCE CORE</span>
-          </div>
-
+        <section className="iris-center" aria-label="IRIS AI voice and query interface">
+          {/* Center Stage: Clean Bubble Loader */}
           <div className="iris-reactor-stage">
             <LiveIrisReactor phase={phase} />
-            <span className="iris-stage-coordinate iris-stage-coordinate--left">
-              EVIDENCE / STREAM
-            </span>
-            <span className="iris-stage-coordinate iris-stage-coordinate--right">
-              TAMIL / ENGLISH
-            </span>
           </div>
 
+          {/* Clean Status Headline */}
           <div className="iris-center__status" aria-live="polite" aria-atomic="true">
             <div className="iris-state-label">
-              <span />
-              {phase === 'standby'
-                ? 'AWAITING OPERATOR VOICE / QUERY'
-                : phase.replaceAll('-', ' ').toUpperCase()}
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-blue-400" />
+              {session.isConnected
+                ? phase.replaceAll('-', ' ').toUpperCase()
+                : 'INSTANT VOICE & MULTI-LINGUAL READY'}
             </div>
-            <h2>{status.label}</h2>
-            <p>{status.detail}</p>
+            <h2 className="font-semibold text-slate-100 sm:text-lg">{status.label}</h2>
+            <p className="mx-auto max-w-md text-xs text-slate-400">{status.detail}</p>
           </div>
 
-          {!session.isConnected && (
-            <div className="iris-start-area">
-              <button
-                className="iris-start-button"
-                disabled={isStarting}
-                onClick={() => void startCall()}
-              >
-                <Power size={17} strokeWidth={1.6} />
-                <span>{isStarting ? 'Connecting to UATU...' : appConfig.startButtonText}</span>
-                <span className="iris-start-button__arrow">↗</span>
-              </button>
-              <span className="iris-start-hint">
-                <Mic size={11} /> Microphone access enabled for bilingual voice commands
-              </span>
-            </div>
-          )}
+          {/* Instant Query Input Field */}
+          <form onSubmit={handleCustomQuerySubmit} className="iris-instant-query-form">
+            <Search size={14} className="ml-1 shrink-0 text-slate-400" />
+            <input
+              type="text"
+              value={customQuery}
+              onChange={(e) => setCustomQuery(e.target.value)}
+              placeholder="Ask in English or Tamil... (e.g. 'Pull up Camera 02', 'CAM-05 Tea Point status enna?')"
+              className="iris-query-input"
+            />
+            <button
+              type="submit"
+              className="iris-query-submit-btn"
+              disabled={!customQuery.trim()}
+              title="Submit query"
+              aria-label="Submit query"
+            >
+              <Send size={13} />
+            </button>
+          </form>
 
           {connectionError && (
-            <p className="iris-connection-error" role="alert">
+            <p className="iris-connection-error text-xs text-amber-300" role="alert">
               {connectionError}
             </p>
           )}
 
+          {/* Live Call Controls Bar (if in active WebRTC call) */}
           {session.isConnected && (
-            <div className="iris-live-controls">
+            <div className="iris-live-controls mt-2">
               <AgentControlBar
                 variant="livekit"
                 isConnected={session.isConnected}
                 isChatOpen={isChatOpen}
                 onIsChatOpenChange={setIsChatOpen}
-                onDisconnect={() => void endCall()}
+                onDisconnect={() => void session.end()}
                 controls={{
-                  leave: true,
+                  leave: false,
                   microphone: true,
                   camera: appConfig.supportsVideoInput,
                   screenShare: appConfig.supportsScreenShare,
@@ -382,17 +505,8 @@ export function IrisConsole({ appConfig }: { appConfig: AppConfig }) {
             </div>
           )}
 
-          {/* Quick Investigation Prompts Bar */}
+          {/* Streamlined Multi-Lingual Quick Action & Investigation Chips */}
           <div className="uatu-quick-prompts-container" aria-label="Quick Investigation Prompts">
-            <div className="uatu-quick-prompts-header">
-              <span className="flex items-center gap-1.5 font-mono text-[10px] tracking-wider text-emerald-400 uppercase">
-                <Sparkles size={12} /> Quick Investigation Queries (Section 4 Grounded)
-              </span>
-              <span className="text-[10px] text-slate-400">
-                Click chip to transmit or speak query directly into microphone
-              </span>
-            </div>
-
             <div className="uatu-quick-prompts-grid">
               {QUICK_PROMPTS.map((p) => {
                 const isActive = activePromptId === p.id;
@@ -408,7 +522,7 @@ export function IrisConsole({ appConfig }: { appConfig: AppConfig }) {
                       <span className="uatu-prompt-tag">{p.tag}</span>
                       <span className="uatu-prompt-icon">
                         {isActive ? (
-                          <Copy size={11} className="text-emerald-400" />
+                          <Copy size={11} className="text-blue-400" />
                         ) : (
                           <Search size={11} />
                         )}
@@ -423,7 +537,7 @@ export function IrisConsole({ appConfig }: { appConfig: AppConfig }) {
         </section>
       </main>
 
-      {/* Video Preview */}
+      {/* Video Preview (if enabled) */}
       {video && !isChatOpen && (
         <div className="iris-video-preview">
           <span>
@@ -434,19 +548,20 @@ export function IrisConsole({ appConfig }: { appConfig: AppConfig }) {
         </div>
       )}
 
-      {/* Live Conversation Transcript Drawer */}
-      {session.isConnected && isChatOpen && (
+      {/* Conversation / Query Transcript Drawer */}
+      {isChatOpen && (
         <aside className="iris-conversation" aria-label="Conversation">
           <header>
-            <span>
-              <span className="iris-tiny-cross">+</span> UATU INVESTIGATION TRANSCRIPT
+            <span className="font-mono text-xs font-semibold tracking-wider text-slate-200">
+              IRIS AI MULTI-LINGUAL INVESTIGATION TRANSCRIPT
             </span>
             <button
+              type="button"
               className="iris-icon-button"
               onClick={() => setIsChatOpen(false)}
               aria-label="Close conversation"
             >
-              <X size={17} />
+              <X size={15} />
             </button>
           </header>
           <AgentChatTranscript
@@ -457,57 +572,50 @@ export function IrisConsole({ appConfig }: { appConfig: AppConfig }) {
         </aside>
       )}
 
-      {/* Help Modal */}
+      {/* Operator Manual Modal */}
       {helpOpen && (
-        <section className="iris-help" aria-label="How to use UATU">
+        <section className="iris-help" aria-label="How to use IRIS">
           <button
+            type="button"
             className="iris-icon-button"
             onClick={() => setHelpOpen(false)}
             aria-label="Close help"
           >
-            <X size={16} />
+            <X size={15} />
           </button>
-          <span className="iris-eyebrow">UATU OPERATOR MANUAL</span>
-          <h2>Voice & Search Center</h2>
+          <span className="iris-eyebrow">IRIS OPERATOR GUIDE</span>
+          <h2>Voice &amp; Multi-Lingual Decision Support</h2>
           <p>
-            Connect, allow microphone access, and query surveillance channels naturally in English
-            or Tamil/Tanglish.
+            Speak or type queries naturally in English, Tamil (தமிழ்), or Tanglish code-switching.
+            IRIS queries the live camera feeds and detection alert database in real time.
           </p>
-          <p className="font-mono text-[11px] text-emerald-300">
-            Example Tamil: “Stores 2-la night yaaru entry pannanga?” / “Tool room la welding machine
-            irukka?”
-          </p>
-          <p>
-            Click any <strong>Quick Investigation Chip</strong> to instantly submit complex
-            multi-camera queries or test edge fallback telemetry.
+          <p className="font-mono text-[11px] text-blue-300">
+            Multi-Lingual Examples:
+            <br />
+            • English: &ldquo;Pull up Camera 02&rdquo; / &ldquo;Show critical safety alerts
+            today&rdquo;
+            <br />
+            • Tanglish: &ldquo;CAM-05 Tea Point-la break overstay alert ethavathu irukka?&rdquo;
+            <br />• Tamil: &ldquo;Stores 2-la night shift-la yaaru unauthorized-ah entry
+            pannanga?&rdquo;
           </p>
           <p className="text-[11px] text-amber-300">
             <ShieldAlert size={12} className="mr-1 inline" />
-            Core Principle: All theft, safety violation, and HR disciplinary alerts require human
-            investigator review before executive action.
+            Decision-support platform: All high-impact safety or security actions require human
+            investigator review.
           </p>
         </section>
       )}
 
-      {/* Mandatory Section 1 Core Principle Persistent Compliance Banner */}
-      <div className="uatu-compliance-banner">
-        <span className="uatu-compliance-badge">SECTION 1 COMPLIANCE</span>
-        <p className="uatu-compliance-text">
-          <strong>CORE PRINCIPLE:</strong> Evidence-based decision-support platform. All high-impact
-          safety, security, HR, or theft-related events require authorized human investigator
-          review.
-        </p>
-      </div>
-
       <footer className="iris-footer">
         <span>
-          <i /> UATU VIDEO INTELLIGENCE PLATFORM
+          <i /> IRIS AI MULTI-LINGUAL DECISION SUPPORT
         </span>
         <span className="iris-footer__center">
-          CAM-01..CAM-09 INDEXED • BI-LINGUAL VOICE DECISION SUPPORT • ON-PREMISE AIR-GAPPED READY
+          CAM-01..CAM-09 INDEXED • ENGLISH • தமிழ் • TANGLISH ACTIVE • ON-PREMISE EDGE AI
         </span>
         <span>
-          STATUS: OPERATIONAL <span className="iris-tiny-cross">+</span>
+          STATUS: ONLINE <span className="iris-tiny-cross">+</span>
         </span>
       </footer>
     </div>

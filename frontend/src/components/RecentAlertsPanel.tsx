@@ -51,8 +51,8 @@ export const RecentAlertsPanel: React.FC<RecentAlertsPanelProps> = ({
       bgColor = 'bg-amber-500/10';
     } else if (text.includes('fire') || text.includes('smoke')) {
       Icon = Flame;
-      iconColor = 'text-amber-400';
-      bgColor = 'bg-amber-500/10';
+      iconColor = isCrit ? 'text-red-400' : 'text-amber-400';
+      bgColor = isCrit ? 'bg-red-500/15' : 'bg-amber-500/10';
     } else if (text.includes('vehicle') || text.includes('car') || text.includes('gate')) {
       Icon = Car;
       iconColor = 'text-blue-400';

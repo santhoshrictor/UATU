@@ -49,7 +49,7 @@ export function App({ appConfig }: AppProps) {
 
   const session = useSession(tokenSource, {
     room,
-    agentConnectTimeoutMilliseconds: 60_000,
+    agentConnectTimeoutMilliseconds: 120_000,
     ...(appConfig.agentName ? { agentName: appConfig.agentName } : {}),
   });
 

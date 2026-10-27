@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   Settings,
   ChevronRight,
+  HardHat,
 } from 'lucide-react';
 import { UATULogo } from './UATULogo';
 
@@ -44,6 +45,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
 }) => {
   const navItems: NavItemConfig[] = [
     { id: 'live', label: 'Live View', icon: Video },
+    { id: 'safety', label: 'Safety & PPE', icon: HardHat },
     { id: 'incidents', label: 'Incidents', icon: AlertTriangle, badge: incidentCount },
     { id: 'settings', label: 'Settings', icon: Settings },
   ];

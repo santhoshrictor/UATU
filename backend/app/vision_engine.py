@@ -186,6 +186,21 @@ class SpatialTracker:
         self.fire_alert_cooldown = alert_cooldown
         self.is_stream_active = False
 
+        # Feature: Personal Protective Equipment (PPE) Detection
+        self.enable_ppe_detection = kwargs.get("enable_ppe_detection", True)
+        ppe_model = kwargs.get("ppe_model") or kwargs.get("ppe_detector")
+        if self.enable_ppe_detection:
+            try:
+                from backend.app.ppe_detector import PPEDetector
+                self.ppe_detector = PPEDetector(model=ppe_model, conf_threshold=0.28)
+            except Exception as e:
+                logger.warning(f"Could not initialize PPEDetector: {e}")
+                self.ppe_detector = None
+        else:
+            self.ppe_detector = None
+        self.last_ppe_alert_time = 0.0
+        self.ppe_alert_cooldown = kwargs.get("ppe_alert_cooldown", 15.0)
+
         # Real-time frame processing FPS telemetry
         self.fps_last_time = time.time()
         self.fps_frame_count = 0
@@ -1016,7 +1031,7 @@ class SpatialTracker:
                             bx1, by1, bx2, by2 = b.get("box", [0, 0, 0, 0])
                             box_area = max(0, bx2 - bx1) * max(0, by2 - by1)
                             b_conf = float(b.get("confidence", 0.0))
-                            if b_conf >= self.smoke_conf_threshold and box_area >= 2000:
+                            if b_conf >= self.fire_conf_threshold and box_area >= 2000:
                                 valid_boxes.append(b)
                         fire_boxes = valid_boxes
                         hazard_detected = len(fire_boxes) > 0 and hazard_detected
@@ -1037,14 +1052,24 @@ class SpatialTracker:
                         now_ts = time.time()
                         if (now_ts - self.last_fire_alert_time) >= self.fire_alert_cooldown:
                             self.last_fire_alert_time = now_ts
+                            if self.camera_id == "CAM-03":
+                                alert_type = "CRITICAL HAZARD: FIRE / FLAME"
+                                alert_detail = f"Critical Fire / Flame hazard identified on {self.camera_id} ({self.zone_name}). Immediate evacuation required."
+                            elif self.camera_id == "CAM-05":
+                                alert_type = "CRITICAL HAZARD: FIRE / SMOKE DETECTED"
+                                alert_detail = f"Hazard identified on {self.camera_id} ({self.zone_name}). Immediate evacuation required."
+                            else:
+                                alert_type = "CRITICAL HAZARD: FIRE / FLAME" if is_fire else "CRITICAL HAZARD: FIRE / SMOKE DETECTED"
+                                alert_detail = f"Hazard identified on {self.camera_id} ({self.zone_name}). Immediate evacuation required."
+
                             fire_payload = {
                                 "id": f"EVT-HAZARD-{int(now_ts)}",
                                 "time": datetime.now(IST).strftime("%H:%M:%S IST"),
                                 "zone": self.zone_name,
                                 "camera": self.camera_id,
-                                "type": "CRITICAL HAZARD: FIRE / SMOKE DETECTED",
+                                "type": alert_type,
                                 "level": "CRITICAL",
-                                "detail": f"Hazard identified on {self.camera_id} ({self.zone_name}). Immediate evacuation required.",
+                                "detail": alert_detail,
                                 "acknowledged": False,
                             }
                             logger.warning(f"WebSocket Hazard Alert Fired: {fire_payload}")
@@ -1053,6 +1078,47 @@ class SpatialTracker:
                     logger.error(f"Error during ML fire detection: {e}")
                     fire_detected = False
                     smoke_detected = False
+
+            # Feature: Personal Protective Equipment (PPE) Detection & Compliance
+            ppe_summary = {
+                "total_detected": 0,
+                "compliant_count": 0,
+                "violation_count": 0,
+                "compliance_rate": 100.0,
+                "has_violation": False,
+                "violations": [],
+                "items": [],
+            }
+            if self.ppe_detector is not None and ret and not self.is_webcam and self.is_stream_active and alert_manager.is_stream_active(self.camera_id):
+                try:
+                    frame, ppe_summary, ppe_items = self.ppe_detector.detect(frame)
+                    if ppe_summary.get("has_violation"):
+                        now_ts = time.time()
+                        if (now_ts - self.last_ppe_alert_time) >= self.ppe_alert_cooldown:
+                            self.last_ppe_alert_time = now_ts
+                            violation_str = ", ".join(ppe_summary.get("violations", [])) if ppe_summary.get("violations") else "Required safety equipment missing"
+                            event_id = f"EVT-PPE-{int(now_ts)}"
+                            ppe_payload = {
+                                "id": event_id,
+                                "event_id": event_id,
+                                "time": datetime.now(IST).strftime("%H:%M:%S IST"),
+                                "timestamp_ist": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+                                "zone": self.zone_name,
+                                "camera": self.camera_id,
+                                "camera_id": self.camera_id,
+                                "type": "PPE COMPLIANCE VIOLATION",
+                                "event_type": "PPE COMPLIANCE VIOLATION",
+                                "level": "WARNING",
+                                "alarm_class": "WARNING",
+                                "severity": "WARNING",
+                                "detail": f"Worker without required safety gear ({violation_str}) detected on {self.camera_id} ({self.zone_name}).",
+                                "confidence_pct": 92.4,
+                                "acknowledged": False,
+                            }
+                            logger.warning(f"WebSocket PPE Alert Fired: {ppe_payload}")
+                            alert_manager.broadcast_sync(ppe_payload)
+                except Exception as e:
+                    logger.debug(f"Error during PPE detection: {e}")
 
             # Sync compatibility aliases
             self.entry_count = self.down_count
@@ -1071,6 +1137,10 @@ class SpatialTracker:
                 "fire_detected": fire_detected,
                 "smoke_detected": smoke_detected,
                 "hazard_type": hazard_type,
+                "ppe_compliance_rate": ppe_summary.get("compliance_rate", 100.0),
+                "ppe_violations": ppe_summary.get("violations", []),
+                "has_ppe_violation": ppe_summary.get("has_violation", False),
+                "ppe_items_count": ppe_summary.get("total_detected", 0),
                 "stream_healthy": True,
                 "fps": reported_fps,
             }

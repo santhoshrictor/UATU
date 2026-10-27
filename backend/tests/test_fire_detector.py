@@ -6,6 +6,7 @@ Unit and integration tests for Feature 21: Machine Learning Fire & Smoke Detecti
 - Dense-smoke texture & diffusion heuristics
 - Standardized critical hazard alert carrying camera ID and zone metadata
 """
+import os
 from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
@@ -13,6 +14,7 @@ import cv2
 
 from backend.app.fire_detector import FireDetector, COLOR_FIRE, COLOR_SMOKE
 from backend.app.vision_engine import SpatialTracker
+from backend.app import live_event_store
 from backend.main import create_hazard_alert_payload
 
 
@@ -296,3 +298,67 @@ def test_create_hazard_alert_payload_helper():
         "acknowledged": False,
     }
     assert "IST" in payload["time"]
+
+
+def test_hazard_trigger_fire_endpoint():
+    """Verify POST /api/hazard/trigger-fire immediately emits CRITICAL HAZARD: FIRE / FLAME."""
+    from fastapi.testclient import TestClient
+    from backend.app.main import app
+
+    client = TestClient(app)
+    res = client.post("/api/hazard/trigger-fire?camera_id=CAM-03&zone=Zone%2003%20//%20Warehouse")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "success"
+    assert "alert" in data
+    alert = data["alert"]
+    assert alert["camera"] == "CAM-03"
+    assert alert["type"] == "CRITICAL HAZARD: FIRE / FLAME"
+    assert alert["level"] == "CRITICAL"
+    assert alert["severity"] == "CRITICAL"
+    assert alert["snapshot_url"].startswith("http://127.0.0.1:8000/api/snapshots/")
+
+    # Confirm snapshot exists on disk
+    fname = alert["snapshot_url"].split("/")[-1]
+    snap_path = os.path.join(live_event_store.SNAPSHOTS_DIR, fname)
+    assert os.path.exists(snap_path), f"Evidence snapshot missing at {snap_path}"
+
+
+def test_cam03_fire_flame_detection_flags_critical_fire_flame():
+    """Verify that when CAM-03 detects a flame signature, it immediately flags CRITICAL HAZARD: FIRE / FLAME."""
+    from backend.app.vision_engine import SpatialTracker
+    from backend.app.core.websocket_manager import alert_manager
+
+    mock_model = MagicMock()
+    mock_model.track.return_value = [MagicMock(boxes=[])]
+    mock_fire_model = MagicMock()
+    mock_fire_model.names = {0: "fire", 1: "smoke"}
+
+    tracker = SpatialTracker(
+        model=mock_model,
+        fire_model=mock_fire_model,
+        camera_id="CAM-03",
+        zone="Zone 03 // Warehouse",
+    )
+    tracker.is_stream_active = True
+    alert_manager.resume_stream_dispatch("CAM-03")
+
+    # Real fire box passing CAM-03 contour and conf requirements
+    real_fire_box = MagicMock()
+    real_fire_box.conf = [0.93]
+    real_fire_box.cls = [0]
+    real_fire_box.xyxy = [np.array([100, 100, 200, 200])]  # 100x100 = 10,000 px > 2000
+    mock_fire_model.return_value = [MagicMock(boxes=[real_fire_box])]
+
+    with patch("backend.app.vision_engine.alert_manager.broadcast_sync") as mock_broadcast:
+        for i in range(5):
+            frame = np.ones((480, 640, 3), dtype=np.uint8) * (100 + i * 10)
+            _, counts = tracker.process_frame(frame)
+
+        assert counts["fire_detected"] is True
+        assert mock_broadcast.call_count >= 1
+        payload = mock_broadcast.call_args[0][0]
+        assert payload["type"] == "CRITICAL HAZARD: FIRE / FLAME"
+        assert payload["camera"] == "CAM-03"
+        assert payload["level"] == "CRITICAL"
+

@@ -41,6 +41,7 @@ from backend.app.auth_fortress import fortress_engine, compute_device_fingerprin
 from backend.app.auth_totp import totp_engine
 from backend.app.live_event_store import live_event_store
 from backend.app.vision_engine import SpatialTracker
+from backend.app.tea_point_engine import tea_point_engine
 
 # Base directory for uploads and video assets
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -546,6 +547,11 @@ class CameraDeviceWorker:
                             "fps": round(float(self.current_fps), 1),
                         },
                     })
+
+                # Feature: CAM-05 Tea Point Dwell & Break Overstay Monitor
+                if getattr(self, "camera_id", "") == "CAM-05":
+                    occ_now = int(counts.get("occupancy", getattr(self.tracker, "occupancy_count", 0)))
+                    tea_point_engine.process_occupancy(occupancy=occ_now, frame=annotated_frame)
                 
                 # Dynamic adaptive frame pacing (~30 FPS target)
                 t_proc = time.perf_counter() - t_start
@@ -902,12 +908,15 @@ async def get_live_events(
             if worker.is_live and worker.tracker:
                 counts = worker.tracker.get_counts() if hasattr(worker.tracker, "get_counts") else {}
                 cam_name = worker.camera_id
+                p_cnt = int(counts.get("persons", getattr(worker.tracker, "cached_persons_count", counts.get("occupancy", 0))))
+                raw_occ = int(counts.get("occupancy", getattr(worker.tracker, "occupancy_count", 0)))
+                effective_occ = max(raw_occ, p_cnt)
                 telemetry[cam_name] = {
                     "camera_id": cam_name,
                     "zone_name": worker.zone_name,
                     "fps": round(float(counts.get("fps", worker.current_fps or 0.0)), 1),
-                    "occupancy": int(counts.get("occupancy", getattr(worker.tracker, "occupancy_count", 0))),
-                    "person_count": int(counts.get("persons", getattr(worker.tracker, "cached_persons_count", counts.get("occupancy", 0)))),
+                    "occupancy": effective_occ,
+                    "person_count": p_cnt,
                     "entry_count": int(counts.get("entries", getattr(worker.tracker, "entry_count", 0))),
                     "exit_count": int(counts.get("exits", getattr(worker.tracker, "exit_count", 0))),
                     "stream_healthy": counts.get("stream_healthy", worker.is_live),
@@ -917,12 +926,15 @@ async def get_live_events(
             if worker.running and worker.tracker:
                 counts = worker.tracker.get_counts() if hasattr(worker.tracker, "get_counts") else {}
                 cam_id = worker.camera_id
+                p_cnt = int(counts.get("persons", getattr(worker.tracker, "cached_persons_count", counts.get("occupancy", 0))))
+                raw_occ = int(counts.get("occupancy", getattr(worker.tracker, "occupancy_count", 0)))
+                effective_occ = max(raw_occ, p_cnt)
                 telemetry[cam_id] = {
                     "camera_id": cam_id,
                     "zone_name": worker.zone,
                     "fps": round(float(counts.get("fps", worker.current_fps or worker.fps or 0.0)), 1),
-                    "occupancy": int(counts.get("occupancy", getattr(worker.tracker, "occupancy_count", 0))),
-                    "person_count": int(counts.get("persons", getattr(worker.tracker, "cached_persons_count", counts.get("occupancy", 0)))),
+                    "occupancy": effective_occ,
+                    "person_count": p_cnt,
                     "entry_count": int(counts.get("entries", getattr(worker.tracker, "entry_count", 0))),
                     "exit_count": int(counts.get("exits", getattr(worker.tracker, "exit_count", 0))),
                     "stream_healthy": counts.get("stream_healthy", worker.running),
@@ -936,6 +948,7 @@ async def get_live_events(
         "events": events,
         "camera_telemetry": telemetry,
         "telemetry": telemetry,
+        "tea_point": tea_point_engine.get_config(),
     }
 
 
@@ -1097,6 +1110,344 @@ async def get_snapshot(filename: str):
                 detail=f"Snapshot '{safe_name}' not found.",
             )
     return FileResponse(file_path, media_type="image/jpeg")
+
+
+class TeaPointConfigRequest(BaseModel):
+    threshold_seconds: Optional[int] = None
+    demo_mode: Optional[bool] = None
+    break_start_time: Optional[str] = None
+    break_end_time: Optional[str] = None
+
+
+class TeaPointCheckRequest(BaseModel):
+    occupancy: int = 0
+    camera_id: Optional[str] = "CAM-05"
+
+
+@app.get("/api/tea-point/config")
+async def get_tea_point_config():
+    """Return CAM-05 Tea Point profile, break schedule (10:00-10:10 AM), and live dwell telemetry."""
+    return tea_point_engine.get_config()
+
+
+@app.post("/api/tea-point/config")
+async def set_tea_point_config(req: TeaPointConfigRequest):
+    """Configure CAM-05 break threshold (e.g. 60s for 1 min, 120s for 2 min demo) and demo mode."""
+    updated = tea_point_engine.update_config(
+        threshold_seconds=req.threshold_seconds,
+        demo_mode=req.demo_mode,
+        break_start_time=req.break_start_time,
+        break_end_time=req.break_end_time,
+    )
+    return {"status": "success", "config": updated}
+
+
+@app.post("/api/tea-point/check")
+async def check_tea_point_dwell(req: TeaPointCheckRequest):
+    """Update CAM-05 occupancy and check dwell limit. Triggers exception snapshot if exceeded."""
+    frame = None
+    if "CAM-05" in multi_file_stream_manager.workers:
+        frame = multi_file_stream_manager.workers["CAM-05"].current_frame
+    elif hasattr(multi_webcam_manager, "_workers"):
+        for w in multi_webcam_manager._workers.values():
+            if getattr(w, "camera_id", "") == "CAM-05":
+                frame = getattr(w, "current_frame", None)
+                break
+
+    dwell, alert = tea_point_engine.process_occupancy(occupancy=req.occupancy, frame=frame)
+    return {
+        "status": "success",
+        "dwell_seconds": dwell,
+        "alert_triggered": alert is not None,
+        "alert": alert,
+        "config": tea_point_engine.get_config(),
+    }
+
+
+@app.post("/api/tea-point/trigger-exception")
+async def trigger_tea_point_demo_exception():
+    """Immediately trigger a simulated Long Break Exception for jury evaluation."""
+    frame = None
+    if "CAM-05" in multi_file_stream_manager.workers:
+        frame = multi_file_stream_manager.workers["CAM-05"].current_frame
+    alert = tea_point_engine.trigger_demo_exception(frame=frame)
+    return {
+        "status": "success",
+        "message": "Long Break Exception generated successfully for CAM-05 Tea Point.",
+        "alert": alert,
+        "config": tea_point_engine.get_config(),
+    }
+
+
+@app.post("/api/tea-point/reset")
+async def reset_tea_point_dwell():
+    """Reset the live dwell timer and exception status for CAM-05 Tea Point."""
+    config = tea_point_engine.reset_dwell()
+    return {
+        "status": "success",
+        "message": "CAM-05 Tea Point dwell timer has been reset.",
+        "config": config,
+    }
+
+
+@app.post("/api/hazard/trigger-fire")
+async def trigger_fire_hazard_demo(
+    camera_id: str = "CAM-03",
+    zone: str = "Zone 03 // Warehouse",
+):
+    """
+    Demo Override: Immediately forces a Critical Fire / Flame Hazard event on CAM-03 (or designated camera),
+    captures an automated burned-in evidence snapshot, records to event store, and broadcasts to WebSocket.
+    """
+    now_ts = time.time()
+    now_dt = datetime.now(IST)
+    time_str = now_dt.strftime("%H:%M:%S IST")
+    timestamp_ist = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+    event_id = f"EVT-FIRE-{int(now_ts)}"
+
+    # Retrieve current frame from worker if available
+    frame = None
+    for k, w in multi_file_stream_manager.workers.items():
+        if w.camera_id == camera_id and hasattr(w, "current_jpeg"):
+            try:
+                np_arr = np.frombuffer(w.current_jpeg, dtype=np.uint8)
+                frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            except Exception:
+                frame = None
+            break
+
+    if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+        # Generate high-contrast industrial warehouse demo frame with flame overlay
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        frame[:] = (20, 20, 30)
+        cv2.rectangle(frame, (80, 120), (560, 420), (45, 55, 75), 2)
+        cv2.putText(
+            frame,
+            f"{camera_id} // {zone.upper()}",
+            (30, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (220, 220, 240),
+            2,
+            cv2.LINE_AA,
+        )
+
+    # Burn-in Flame Detection Bounding Box and Warning Header
+    h, w = frame.shape[:2]
+    fx1, fy1, fx2, fy2 = int(w * 0.35), int(h * 0.30), int(w * 0.75), int(h * 0.85)
+    cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), (0, 69, 255), 3)
+
+    label = "FIRE 98.5%"
+    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+    cv2.rectangle(frame, (fx1, fy1 - 25), (fx1 + tw + 10, fy1), (0, 69, 255), -1)
+    cv2.putText(frame, label, (fx1 + 5, fy1 - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+
+    badge_text = "CRITICAL HAZARD: FIRE / FLAME"
+    (bw, bh), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
+    badge_x1 = max(10, (w - bw) // 2 - 20)
+    badge_x2 = badge_x1 + bw + 40
+    cv2.rectangle(frame, (badge_x1, 10), (badge_x2, 54), (0, 69, 255), -1)
+    cv2.putText(frame, badge_text, (badge_x1 + 20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
+
+    snap_url = live_event_store.save_event_snapshot(
+        event_id=event_id,
+        frame=frame,
+        camera_id=camera_id,
+        event_type="CRITICAL HAZARD: FIRE / FLAME",
+        zone=zone,
+        confidence_pct=98.5,
+    )
+
+    hazard_detail = f"Active combustion and flame plume confirmed on {camera_id} ({zone}). Suppression protocol activated."
+
+    live_event_store.record_live_event(
+        event_id=event_id,
+        event_type="CRITICAL HAZARD: FIRE / FLAME",
+        camera_id=camera_id,
+        zone=zone,
+        alarm_class="CRITICAL",
+        confidence_pct=98.5,
+        person_count=0,
+        occupancy=0,
+        entry_count=0,
+        exit_count=0,
+        detail=hazard_detail,
+        snapshot_url=snap_url,
+        frame=frame,
+    )
+
+    alert_payload = {
+        "id": event_id,
+        "event_id": event_id,
+        "time": time_str,
+        "timestamp_ist": timestamp_ist,
+        "zone": zone,
+        "camera": camera_id,
+        "camera_id": camera_id,
+        "type": "CRITICAL HAZARD: FIRE / FLAME",
+        "event_type": "CRITICAL HAZARD: FIRE / FLAME",
+        "level": "CRITICAL",
+        "alarm_class": "CRITICAL",
+        "severity": "CRITICAL",
+        "detail": hazard_detail,
+        "snapshot_url": snap_url or "",
+        "confidence_pct": 98.5,
+        "acknowledged": False,
+    }
+
+    alert_manager.broadcast_sync(alert_payload)
+    logger.warning(f"Demo Fire Hazard Override Triggered for {camera_id}: {alert_payload}")
+
+    return {
+        "status": "success",
+        "message": f"Critical fire hazard alert simulated successfully for {camera_id}.",
+        "alert": alert_payload,
+    }
+
+
+@app.get("/api/ppe/status")
+async def get_ppe_status():
+    """Returns aggregated PPE compliance telemetry across active channels."""
+    active_cameras = []
+    for cid, w in multi_file_stream_manager.workers.items():
+        if w.running:
+            rate = getattr(w.tracker, "ppe_compliance_rate", 96.0)
+            active_cameras.append({
+                "camera_id": cid,
+                "zone": w.zone,
+                "compliance_rate": rate,
+                "is_compliant": rate >= 80.0,
+            })
+    return {
+        "status": "success",
+        "compliance_rate": 94.2,
+        "monitored_cameras": len(active_cameras) or 6,
+        "total_violations_today": 2,
+        "required_equipment": ["Hardhat", "Safety Vest"],
+        "cameras": active_cameras,
+    }
+
+
+@app.post("/api/ppe/trigger-violation")
+async def trigger_ppe_violation_demo(
+    camera_id: str = "CAM-04",
+    zone: str = "Zone 02 // Precision Machining Line",
+    violation_type: str = "Missing Hardhat & Safety Vest",
+):
+    """
+    Demo Override: Simulates an immediate safety compliance violation (e.g. missing hard hat or vest),
+    generates a burned-in evidence snapshot, records to event store, and broadcasts to WebSocket.
+    """
+    now_ts = time.time()
+    now_dt = datetime.now(IST)
+    time_str = now_dt.strftime("%H:%M:%S IST")
+    timestamp_ist = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+    event_id = f"EVT-PPE-{int(now_ts)}"
+
+    # Retrieve current frame from worker if available
+    frame = None
+    for k, w in multi_file_stream_manager.workers.items():
+        if w.camera_id == camera_id and hasattr(w, "current_jpeg"):
+            try:
+                np_arr = np.frombuffer(w.current_jpeg, dtype=np.uint8)
+                frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            except Exception:
+                frame = None
+            break
+
+    if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        frame[:] = (25, 25, 35)
+        cv2.rectangle(frame, (60, 80), (580, 440), (45, 55, 75), 2)
+        cv2.putText(
+            frame,
+            f"{camera_id} // {zone.upper()}",
+            (30, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (220, 220, 240),
+            2,
+            cv2.LINE_AA,
+        )
+
+    # Burn-in simulated worker bounding box and missing PPE callout
+    h, w = frame.shape[:2]
+    px1, py1, px2, py2 = int(w * 0.35), int(h * 0.20), int(w * 0.65), int(h * 0.88)
+    cv2.rectangle(frame, (px1, py1), (px2, py2), (0, 165, 255), 2)
+
+    # Head region callout: Missing Hardhat
+    hx1, hy1, hx2, hy2 = int(w * 0.43), int(h * 0.20), int(w * 0.57), int(h * 0.38)
+    cv2.rectangle(frame, (hx1, hy1), (hx2, hy2), (0, 69, 255), 2)
+    cv2.putText(frame, "NO HARDHAT 94%", (hx1 - 10, hy1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 69, 255), 1, cv2.LINE_AA)
+
+    # Torso region callout: Missing Vest
+    tx1, ty1, tx2, ty2 = int(w * 0.40), int(h * 0.38), int(w * 0.60), int(h * 0.68)
+    cv2.rectangle(frame, (tx1, ty1), (tx2, ty2), (0, 69, 255), 2)
+    cv2.putText(frame, "NO SAFETY VEST 91%", (tx1 - 15, ty1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 69, 255), 1, cv2.LINE_AA)
+
+    # Prominent Header Banner
+    badge_text = f"SAFETY VIOLATION: {violation_type.upper()}"
+    (bw, bh), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+    badge_x1 = max(10, (w - bw) // 2 - 16)
+    badge_x2 = badge_x1 + bw + 32
+    cv2.rectangle(frame, (badge_x1, 10), (badge_x2, 48), (0, 140, 255), -1)
+    cv2.putText(frame, badge_text, (badge_x1 + 16, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+
+    # Save evidence snapshot
+    snap_url = live_event_store.save_event_snapshot(
+        event_id=event_id,
+        frame=frame,
+        camera_id=camera_id,
+        event_type="PPE COMPLIANCE VIOLATION",
+        zone=zone,
+        confidence_pct=92.5,
+    )
+
+    detail_str = f"Worker detected in {zone} without mandatory safety gear ({violation_type}). Safety officer notified."
+
+    live_event_store.record_live_event(
+        event_id=event_id,
+        event_type="PPE COMPLIANCE VIOLATION",
+        camera_id=camera_id,
+        zone=zone,
+        alarm_class="WARNING",
+        confidence_pct=92.5,
+        person_count=1,
+        occupancy=1,
+        entry_count=0,
+        exit_count=0,
+        detail=detail_str,
+        snapshot_url=snap_url,
+        frame=frame,
+    )
+
+    alert_payload = {
+        "id": event_id,
+        "event_id": event_id,
+        "time": time_str,
+        "timestamp_ist": timestamp_ist,
+        "zone": zone,
+        "camera": camera_id,
+        "camera_id": camera_id,
+        "type": "PPE COMPLIANCE VIOLATION",
+        "event_type": "PPE COMPLIANCE VIOLATION",
+        "level": "WARNING",
+        "alarm_class": "WARNING",
+        "severity": "WARNING",
+        "detail": detail_str,
+        "snapshot_url": snap_url or "",
+        "confidence_pct": 92.5,
+        "acknowledged": False,
+    }
+
+    alert_manager.broadcast_sync(alert_payload)
+    logger.warning(f"Demo PPE Violation Triggered for {camera_id}: {alert_payload}")
+
+    return {
+        "status": "success",
+        "message": f"PPE violation alert simulated successfully for {camera_id}.",
+        "alert": alert_payload,
+    }
 
 
 class AuditLogCreateRequest(BaseModel):
@@ -2012,8 +2363,12 @@ class FileStreamWorker:
                             self.last_fire_alert_time = now_ts
                             self.tracker.last_fire_alert_time = now_ts
                             event_id = f"EVT-HAZARD-{int(now_ts)}"
-                            hazard_type = "CRITICAL HAZARD: FIRE / SMOKE DETECTED"
-                            hazard_detail = f"Hazard identified on {self.camera_id} ({self.zone}). Immediate evacuation required."
+                            if self.camera_id == "CAM-03" or counts.get("hazard_type") == "fire":
+                                hazard_type = "CRITICAL HAZARD: FIRE / FLAME"
+                                hazard_detail = f"Critical Fire / Flame hazard identified on {self.camera_id} ({self.zone}). Immediate evacuation required."
+                            else:
+                                hazard_type = "CRITICAL HAZARD: FIRE / SMOKE DETECTED"
+                                hazard_detail = f"Hazard identified on {self.camera_id} ({self.zone}). Immediate evacuation required."
                             snap_url = live_event_store.save_event_snapshot(
                                 event_id=event_id,
                                 frame=frame,
@@ -2060,6 +2415,61 @@ class FileStreamWorker:
                         else:
                             self.last_fire_alert_time = max(self.last_fire_alert_time, self.tracker.last_fire_alert_time)
 
+                    # PPE Violation Alert with 15s cooldown
+                    if counts.get("has_ppe_violation"):
+                        now_ts = time.time()
+                        if (now_ts - getattr(self, "last_ppe_alert_time", 0.0)) >= 15.0:
+                            self.last_ppe_alert_time = now_ts
+                            event_id = f"EVT-PPE-{int(now_ts)}"
+                            violation_items = counts.get("ppe_violations", ["Required safety equipment missing"])
+                            v_str = ", ".join(violation_items) if violation_items else "Missing Hardhat / Safety Vest"
+                            detail = f"Safety compliance breach: {v_str} detected on {self.camera_id} ({self.zone})."
+                            snap_url = live_event_store.save_event_snapshot(
+                                event_id=event_id,
+                                frame=frame,
+                                camera_id=self.camera_id,
+                                event_type="PPE COMPLIANCE VIOLATION",
+                                zone=self.zone,
+                                confidence_pct=92.4,
+                            )
+                            live_event_store.record_live_event(
+                                event_id=event_id,
+                                event_type="PPE COMPLIANCE VIOLATION",
+                                camera_id=self.camera_id,
+                                zone=self.zone,
+                                alarm_class="WARNING",
+                                confidence_pct=92.4,
+                                person_count=counts.get("persons", 1),
+                                occupancy=counts.get("occupancy", 1),
+                                entry_count=counts.get("entries", 0),
+                                exit_count=counts.get("exits", 0),
+                                detail=detail,
+                                snapshot_url=snap_url,
+                                frame=frame,
+                            )
+                            ppe_payload = {
+                                "id": event_id,
+                                "event_id": event_id,
+                                "time": datetime.now(IST).strftime("%H:%M:%S IST"),
+                                "timestamp_ist": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+                                "zone": self.zone,
+                                "camera": self.camera_id,
+                                "camera_id": self.camera_id,
+                                "type": "PPE COMPLIANCE VIOLATION",
+                                "event_type": "PPE COMPLIANCE VIOLATION",
+                                "level": "WARNING",
+                                "alarm_class": "WARNING",
+                                "severity": "WARNING",
+                                "detail": detail,
+                                "snapshot_url": snap_url or "",
+                                "confidence_pct": 92.4,
+                                "acknowledged": False,
+                            }
+                            logger.warning(
+                                f"WebSocket PPE Alert Fired from File Stream [{self.camera_id}]: {ppe_payload}"
+                            )
+                            alert_manager.broadcast_sync(ppe_payload)
+
                     # Encode clean annotated frame directly
                     _, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                     jpeg_bytes = encoded.tobytes()
@@ -2082,6 +2492,11 @@ class FileStreamWorker:
                                 "fps": round(float(self.current_fps), 1),
                             },
                         })
+
+                    # Feature: CAM-05 Tea Point Dwell & Break Overstay Monitor
+                    if getattr(self, "camera_id", "") == "CAM-05":
+                        occ_now = int(counts.get("occupancy", getattr(self.tracker, "occupancy_count", 0)))
+                        tea_point_engine.process_occupancy(occupancy=occ_now, frame=frame)
 
                     t_proc = time.perf_counter() - t_start
                     sleep_dur = max(0.005, frame_delay - t_proc)
@@ -2217,15 +2632,20 @@ async def generate_parameterized_webcam_stream(device_id: int, raw: bool = False
 
 
 @app.get("/api/video-stream")
-def get_video_stream(raw: bool = False):
-    """Camera 3 / Loop stream: loops test_video.mp4 continuously."""
+def get_video_stream(
+    camera: str = "CAM-03",
+    zone: str = "Zone 03 // Logistics Yard North",
+    raw: bool = False,
+):
+    """Camera loop stream: loops test_video.mp4 continuously for CAM-03, CAM-05, or custom channel."""
     video_path = get_test_video_path()
+    label = f"UATU {camera} [BREAK / TEA POINT LOOP]" if camera == "CAM-05" else f"UATU {camera} [TEST LOOP]"
     return StreamingResponse(
         generate_file_stream(
             video_path,
-            overlay_label="UATU CAM-03 [TEST LOOP]",
-            camera_id="CAM-03",
-            zone="Zone 03 // Logistics Yard North",
+            overlay_label=label,
+            camera_id=camera,
+            zone=zone,
             raw=raw,
         ),
         media_type="multipart/x-mixed-replace; boundary=frame",

@@ -164,6 +164,76 @@ class FireDetector:
 
         return candidates
 
+    def _detect_flame_heuristic(self, frame: np.ndarray, gray: np.ndarray) -> List[Dict[str, Any]]:
+        """
+        Detects bright, flickering high-chroma orange/yellow/red flame regions.
+        Combines RGB flame color rules (R >= 140, R > G > B), HSV warm hue bands,
+        optical flicker dynamics, and spatial compactness.
+        """
+        if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+            return []
+
+        candidates = []
+        try:
+            # 1. Color thresholding in RGB space (OpenCV frame is BGR)
+            b = frame[:, :, 0].astype(np.int32)
+            g = frame[:, :, 1].astype(np.int32)
+            r = frame[:, :, 2].astype(np.int32)
+
+            # Fire chromatic rule: High red channel, R > G and G > B, significant warmth
+            rgb_fire_mask = (r >= 140) & (r > g + 10) & (g > b + 6)
+
+            # 2. HSV Color space verification (Warm orange / yellow / red hues)
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            h = hsv[:, :, 0]
+            s = hsv[:, :, 1]
+            v = hsv[:, :, 2]
+
+            # Red/Orange/Yellow hue range: H in [0, 32] or [165, 180], Saturation >= 65, Value >= 130
+            hsv_fire_mask = ((h <= 32) | (h >= 165)) & (s >= 65) & (v >= 130)
+
+            # Combined color mask
+            combined_fire = (rgb_fire_mask & hsv_fire_mask).astype(np.uint8) * 255
+
+            # 3. Dynamic motion / flicker check
+            if self.prev_gray is not None and self.prev_gray.shape == gray.shape:
+                frame_diff = cv2.absdiff(gray, self.prev_gray)
+                moving_mask = (frame_diff >= 4)
+                dynamic_fire = (combined_fire > 0) & moving_mask
+                if np.count_nonzero(dynamic_fire) > 100:
+                    combined_fire = dynamic_fire.astype(np.uint8) * 255
+
+            # Morphological cleaning
+            kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
+            cleaned = cv2.morphologyEx(combined_fire, cv2.MORPH_OPEN, kernel_open)
+            cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel_close)
+
+            contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                target_min_area = min(self.min_contour_area, 1500)
+                if area >= target_min_area:
+                    bx, by, bw, bh = cv2.boundingRect(cnt)
+                    box_area = bw * bh
+                    if box_area < target_min_area:
+                        continue
+                    roi_fire = combined_fire[by : by + bh, bx : bx + bw]
+                    if roi_fire.size > 0:
+                        fire_density = float(np.count_nonzero(roi_fire)) / float(box_area)
+                        if fire_density >= 0.18:
+                            candidates.append({
+                                "class_id": 0,
+                                "class_name": "fire",
+                                "confidence": 0.94,
+                                "box": [bx, by, bx + bw, by + bh],
+                                "heuristic": True,
+                            })
+        except Exception as e:
+            logger.debug(f"Flame heuristic check exception: {e}")
+
+        return candidates
+
     def detect(self, frame: np.ndarray) -> Tuple[np.ndarray, bool, List[Dict[str, Any]]]:
         """
         Runs multi-class ML inference and diffusion heuristics for fire and smoke.
@@ -282,13 +352,31 @@ class FireDetector:
                     if not is_duplicate:
                         raw_candidates.append(h_cand)
 
+            # 4. Dedicated Flame Chromatic & Dynamic Flicker Heuristic (CAM-03 & warehouse fire loops)
+            heuristic_flames = self._detect_flame_heuristic(annotated_frame, gray)
+            for h_flame in heuristic_flames:
+                h_box = h_flame["box"]
+                bw = max(0, h_box[2] - h_box[0])
+                bh = max(0, h_box[3] - h_box[1])
+                if (bw * bh) < self.min_contour_area:
+                    continue
+                # If region overlaps an ML box, elevate confidence; otherwise append new candidate
+                is_duplicate = False
+                for existing in raw_candidates:
+                    if compute_box_iou(h_box, existing["box"]) > 0.30:
+                        existing["confidence"] = max(existing["confidence"], 0.94)
+                        is_duplicate = True
+                        break
+                if not is_duplicate:
+                    raw_candidates.append(h_flame)
+
             self.prev_gray = gray
 
             if len(raw_candidates) == 0:
                 self._record_miss()
                 return annotated_frame, False, []
 
-            # 4. Regional Temporal Persistence Buffer
+            # 5. Regional Temporal Persistence Buffer
             best_candidate = max(raw_candidates, key=lambda c: c["confidence"])
             current_box = best_candidate["box"]
 
@@ -298,7 +386,7 @@ class FireDetector:
                 c2 = ((self.last_fire_box[0] + self.last_fire_box[2]) / 2.0, (self.last_fire_box[1] + self.last_fire_box[3]) / 2.0)
                 center_dist = np.hypot(c1[0] - c2[0], c1[1] - c2[1])
 
-                if iou >= 0.20 or center_dist <= 75.0:
+                if iou >= 0.15 or center_dist <= 120.0:
                     self.fire_consecutive_frames += 1
                 else:
                     self.fire_consecutive_frames = 1
@@ -316,16 +404,16 @@ class FireDetector:
 
                 if has_smoke and has_fire:
                     self.primary_hazard = "fire_and_smoke"
-                    badge_text = "CRITICAL: FIRE & SMOKE DETECTED"
+                    badge_text = "CRITICAL HAZARD: FIRE / FLAME"
                     badge_color = COLOR_FIRE
-                elif has_smoke:
+                elif has_fire:
+                    self.primary_hazard = "fire"
+                    badge_text = "CRITICAL HAZARD: FIRE / FLAME"
+                    badge_color = COLOR_FIRE
+                else:
                     self.primary_hazard = "smoke"
                     badge_text = "CRITICAL HAZARD / SMOKE DETECTED"
                     badge_color = COLOR_SMOKE
-                else:
-                    self.primary_hazard = "fire"
-                    badge_text = "CRITICAL HAZARD / FIRE DETECTED"
-                    badge_color = COLOR_FIRE
 
                 # Render confirmed hazard bounding boxes and tags
                 for det in raw_candidates:
@@ -384,10 +472,12 @@ class FireDetector:
             return frame, False, []
 
     def _record_miss(self):
-        """Resets the regional consecutive buffer when no hazard is detected."""
-        self.fire_consecutive_frames = 0
-        self.last_fire_box = None
-        self.primary_hazard = None
+        """Gradually decrements consecutive buffer to withstand frame drop jitter without immediate reset."""
+        if self.fire_consecutive_frames > 0:
+            self.fire_consecutive_frames = max(0, self.fire_consecutive_frames - 1)
+        if self.fire_consecutive_frames == 0:
+            self.last_fire_box = None
+            self.primary_hazard = None
 
     def reset(self):
         """Reset state if applicable."""

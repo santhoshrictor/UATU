@@ -14,6 +14,7 @@ import {
   MapPin,
   ShieldCheck,
   Upload,
+  HardHat,
 } from 'lucide-react';
 import { EnrollModal } from './components/EnrollModal';
 import { SettingsModal } from './components/SettingsModal';
@@ -24,6 +25,7 @@ import { TopHeader } from './components/TopHeader';
 import { CameraCard, type CameraCardData } from './components/CameraCard';
 import { RecentAlertsPanel } from './components/RecentAlertsPanel';
 import { EvidenceModal } from './components/EvidenceModal';
+import { TeaPointControlModal, type TeaPointConfig } from './components/TeaPointControlModal';
 import { Button } from './components/ui/button';
 import { FlowButton } from './components/ui/flow-button';
 import { UATUVoiceAssistantLauncher } from './components/UATUVoiceAssistantLauncher';
@@ -114,11 +116,11 @@ const INITIAL_CAMERAS: CameraChannel[] = [
   {
     id: 'CAM-03',
     name: 'Warehouse',
-    zone: 'Zone 03 // Logistics Yard North',
+    zone: 'Zone 03 // Warehouse',
     sourceType: 'BACKEND_LOOP',
-    streamUrl: 'http://127.0.0.1:8000/api/video-stream',
-    isOnline: false,
-    fps: 0,
+    streamUrl: 'http://127.0.0.1:8000/api/video-stream?camera=CAM-03&zone=Zone%2003%20//%20Warehouse',
+    isOnline: true,
+    fps: 24,
     resolution: '1080p',
     occupancy: 0,
     entry: 0,
@@ -139,16 +141,17 @@ const INITIAL_CAMERAS: CameraChannel[] = [
   },
   {
     id: 'CAM-05',
-    name: 'Server Room Alpha',
-    zone: 'Zone 04 // Tier-3 Data Center Vault',
-    sourceType: 'STANDBY',
-    streamUrl: '',
-    isOnline: false,
-    fps: 0,
-    resolution: '4K UHD',
-    occupancy: 0,
-    entry: 0,
-    exit: 0,
+    name: 'Tea Point / Break Lounge',
+    zone: 'Zone 05 // Refreshment Hub & Tea Point',
+    sourceType: 'BACKEND_LOOP',
+    streamUrl: 'http://127.0.0.1:8000/api/video-stream?camera=CAM-05&zone=Zone%2005%20//%20Refreshment%20Hub%20%26%20Tea%20Point',
+    isOnline: true,
+    fps: 24,
+    resolution: '1080p',
+    occupancy: 1,
+    personCount: 1,
+    entry: 4,
+    exit: 3,
   },
   {
     id: 'CAM-06',
@@ -346,6 +349,43 @@ export const App: React.FC = () => {
     }
   }, [alerts]);
 
+  // Crowd Gathering Detection Rule (10 to 15+ members simultaneously)
+  const lastCrowdAlertTimeRef = useRef<Record<string, number>>({});
+
+  const checkCrowdGatheringRule = useCallback((cameraList: CameraChannel[]) => {
+    const now = Date.now();
+    cameraList.forEach((cam) => {
+      if (!cam.isOnline) return;
+      const count = (cam.occupancy && cam.occupancy > 0) ? cam.occupancy : (cam.personCount ?? 0);
+      // Crowd Gathering threshold rule: 10 to 15 members or more
+      if (count >= 10) {
+        const lastAlert = lastCrowdAlertTimeRef.current[cam.id] || 0;
+        // 30-second cooldown per camera node
+        if (now - lastAlert >= 30000) {
+          lastCrowdAlertTimeRef.current[cam.id] = now;
+          const timeIST = new Date().toLocaleTimeString('en-US', { hour12: false }) + ' IST';
+          const alertId = `EVT-CROWD-${cam.id}-${Math.floor(now / 1000)}`;
+          const crowdAlert: IncidentAlert = {
+            id: alertId,
+            timestamp: timeIST,
+            time: timeIST,
+            zone: cam.zone || 'Facility Zone',
+            camera: cam.id,
+            type: 'Crowd Gathering // High Occupancy Threshold',
+            severity: 'WARNING',
+            level: 'WARNING',
+            detail: `Crowd gathering warning at ${cam.zone} (${cam.id}): ${count} individuals detected simultaneously (exceeds safety threshold of 10-15 members).`,
+            snapshot_url: cam.streamUrl || '',
+            confidence_pct: 97.0,
+            acknowledged: false,
+          };
+          setAlerts((prev) => [crowdAlert, ...prev.filter((a) => a.id !== alertId)]);
+          console.warn(`[UATU Crowd Rule] Crowd Gathering warning alert triggered for ${cam.id}: ${count} persons`);
+        }
+      }
+    });
+  }, []);
+
   // Synchronize Incident Dispatch Queue and Live Camera Telemetry
   useEffect(() => {
     let isMounted = true;
@@ -379,20 +419,31 @@ export const App: React.FC = () => {
           }
           const telemMap = data.camera_telemetry || data.telemetry;
           if (telemMap && typeof telemMap === 'object') {
-            setCameras((prev) =>
-              prev.map((c) => {
+            setCameras((prev) => {
+              const updated = prev.map((c) => {
                 const telem = telemMap[c.id];
                 if (!telem) return c;
+                const detectedPersons = telem.person_count !== undefined
+                  ? Number(telem.person_count)
+                  : (telem.persons !== undefined ? Number(telem.persons) : 0);
+                const rawOcc = telem.occupancy !== undefined ? Number(telem.occupancy) : 0;
+                // Fix camera node occupancy: ensure occupancy accurately reflects detected persons
+                const effectiveOcc = rawOcc > 0 ? rawOcc : detectedPersons;
                 return {
                   ...c,
-                  occupancy: telem.occupancy !== undefined ? telem.occupancy : c.occupancy,
-                  personCount: telem.person_count !== undefined ? telem.person_count : (telem.occupancy !== undefined ? telem.occupancy : c.personCount),
+                  occupancy: effectiveOcc,
+                  personCount: detectedPersons > 0 ? detectedPersons : effectiveOcc,
                   entry: telem.entry_count !== undefined ? telem.entry_count : c.entry,
                   exit: telem.exit_count !== undefined ? telem.exit_count : c.exit,
                   fps: telem.fps !== undefined && telem.fps > 0 ? telem.fps : c.fps,
                 };
-              })
-            );
+              });
+              checkCrowdGatheringRule(updated);
+              return updated;
+            });
+          }
+          if (data.tea_point) {
+            setTeaPointConfig(data.tea_point);
           }
         }
       } catch (err) {
@@ -453,6 +504,202 @@ export const App: React.FC = () => {
     setEvidenceModalTab('GALLERY');
     setIsEvidenceModalOpen(true);
   }, []);
+
+  // CAM-05 Tea Point Break Monitoring & Schedule State
+  const [teaPointConfig, setTeaPointConfig] = useState<TeaPointConfig | null>(null);
+  const [isTeaPointModalOpen, setIsTeaPointModalOpen] = useState<boolean>(false);
+  const [teaPointThresholdSec, setTeaPointThresholdSec] = useState<number>(60);
+  const [teaPointCountdownSec, setTeaPointCountdownSec] = useState<number>(60);
+  const [teaPointTriggered, setTeaPointTriggered] = useState<boolean>(false);
+
+  // Sync threshold from config when received
+  useEffect(() => {
+    if (teaPointConfig?.threshold_seconds) {
+      setTeaPointThresholdSec(teaPointConfig.threshold_seconds);
+      setTeaPointCountdownSec((prev) => (prev === 60 ? teaPointConfig.threshold_seconds : prev));
+    }
+  }, [teaPointConfig?.threshold_seconds]);
+
+  const handleUpdateTeaPointConfig = useCallback(async (threshold: number, demoMode: boolean) => {
+    try {
+      setTeaPointThresholdSec(threshold);
+      setTeaPointCountdownSec(threshold);
+      setTeaPointTriggered(false);
+      const res = await fetch('http://127.0.0.1:8000/api/tea-point/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ threshold_seconds: threshold, demo_mode: demoMode }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.config) setTeaPointConfig(data.config);
+      }
+    } catch (err) {
+      console.warn('[UATU Tea Point] Failed to update config:', err);
+    }
+  }, []);
+
+  const handleTriggerTeaPointDemo = useCallback(async () => {
+    try {
+      setTeaPointTriggered(true);
+      const res = await fetch('http://127.0.0.1:8000/api/tea-point/trigger-exception', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.alert) {
+          const alertObj: IncidentAlert = {
+            id: data.alert.id || data.alert.event_id,
+            timestamp: data.alert.timestamp_ist || data.alert.time,
+            time: data.alert.time,
+            zone: data.alert.zone,
+            camera: data.alert.camera_id,
+            type: data.alert.event_type || data.alert.type,
+            severity: (data.alert.alarm_class || 'CRITICAL') as AlertSeverity,
+            level: (data.alert.alarm_class || 'CRITICAL') as AlertSeverity,
+            detail: data.alert.detail,
+            snapshot_url: data.alert.snapshot_url,
+            confidence_pct: data.alert.confidence_pct,
+            acknowledged: false,
+          };
+          setAlerts((prev) => [alertObj, ...prev.filter((a) => a.id !== alertObj.id)]);
+          // Open Evidence inspection modal directly for the captured snapshot
+          setSelectedEvidenceAlert(alertObj);
+          setEvidenceModalTab('INSPECT');
+          setIsEvidenceModalOpen(true);
+        }
+      }
+    } catch (err) {
+      console.warn('[UATU Tea Point] Failed to trigger demo exception:', err);
+    }
+  }, []);
+
+  const handleTriggerFireHazardDemo = useCallback(async (camId: string = 'CAM-03') => {
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/api/hazard/trigger-fire?camera_id=${camId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.alert) {
+          const alertObj: IncidentAlert = {
+            id: data.alert.id || data.alert.event_id,
+            timestamp: data.alert.timestamp_ist || data.alert.time,
+            time: data.alert.time,
+            zone: data.alert.zone || 'Zone 03 // Warehouse',
+            camera: data.alert.camera || data.alert.camera_id || camId,
+            type: data.alert.event_type || data.alert.type || 'CRITICAL HAZARD: FIRE / FLAME',
+            severity: (data.alert.alarm_class || data.alert.level || 'CRITICAL') as AlertSeverity,
+            level: (data.alert.alarm_class || data.alert.level || 'CRITICAL') as AlertSeverity,
+            detail: data.alert.detail || 'Critical fire / flame hazard confirmed. Immediate evacuation required.',
+            snapshot_url: data.alert.snapshot_url || '',
+            confidence_pct: data.alert.confidence_pct || 98.5,
+            acknowledged: false,
+          };
+          setAlerts((prev) => {
+            const nextAlerts = [alertObj, ...prev.filter((a) => a.id !== alertObj.id)];
+            try {
+              localStorage.setItem('uatu_incident_queue', JSON.stringify(nextAlerts));
+            } catch (err) {
+              console.warn('[UATU Fire Hazard] LocalStorage write failed:', err);
+            }
+            return nextAlerts;
+          });
+          setSelectedEvidenceAlert(alertObj);
+          setEvidenceModalTab('INSPECT');
+          setIsEvidenceModalOpen(true);
+        }
+      }
+    } catch (err) {
+      console.warn('[UATU Fire Hazard] Failed to trigger demo fire alert:', err);
+    }
+  }, []);
+
+  const handleTriggerPPEViolation = useCallback(async (camId: string = 'CAM-04') => {
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/api/ppe/trigger-violation?camera_id=${camId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.alert) {
+          const alertObj: IncidentAlert = {
+            id: data.alert.id || data.alert.event_id,
+            timestamp: data.alert.timestamp_ist || data.alert.time,
+            time: data.alert.time,
+            zone: data.alert.zone || 'Zone 02 // Precision Machining Line',
+            camera: data.alert.camera || data.alert.camera_id || camId,
+            type: data.alert.event_type || data.alert.type || 'PPE COMPLIANCE VIOLATION',
+            severity: 'WARNING',
+            level: 'WARNING',
+            detail: data.alert.detail || 'Safety compliance breach: Required safety equipment missing.',
+            snapshot_url: data.alert.snapshot_url || '',
+            confidence_pct: data.alert.confidence_pct || 92.5,
+            acknowledged: false,
+          };
+          setAlerts((prev) => {
+            const nextAlerts = [alertObj, ...prev.filter((a) => a.id !== alertObj.id)];
+            try {
+              localStorage.setItem('uatu_incident_queue', JSON.stringify(nextAlerts));
+            } catch (err) {
+              console.warn('[UATU PPE] LocalStorage write failed:', err);
+            }
+            return nextAlerts;
+          });
+          setSelectedEvidenceAlert(alertObj);
+          setEvidenceModalTab('INSPECT');
+          setIsEvidenceModalOpen(true);
+        }
+      }
+    } catch (err) {
+      console.warn('[UATU PPE] Failed to trigger demo violation:', err);
+    }
+  }, []);
+
+  const handleResetTeaPointTimer = useCallback(async () => {
+    setTeaPointCountdownSec(teaPointThresholdSec);
+    setTeaPointTriggered(false);
+    try {
+      const res = await fetch('http://127.0.0.1:8000/api/tea-point/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.config) setTeaPointConfig(data.config);
+      }
+    } catch (err) {
+      console.warn('[UATU Tea Point] Failed to reset dwell timer:', err);
+    }
+  }, [teaPointThresholdSec]);
+
+  // Active second-by-second countdown loop for CAM-05 (1m 00s down to 0m 00s)
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const cam05 = cameras.find((c) => c.id === 'CAM-05');
+      const occ = (cam05?.occupancy && cam05.occupancy > 0) ? cam05.occupancy : (cam05?.personCount ?? 0);
+      const hasPresence = Boolean(cam05?.isOnline && occ > 0);
+
+      if (hasPresence) {
+        setTeaPointCountdownSec((prev) => {
+          if (prev <= 1) {
+            // Once countdown reaches 0, trigger Long Break Exception alert
+            if (!teaPointTriggered) {
+              setTeaPointTriggered(true);
+              handleTriggerTeaPointDemo();
+            }
+            return 0;
+          }
+          return prev - 1;
+        });
+      }
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [cameras, teaPointTriggered, handleTriggerTeaPointDemo]);
 
   // Live Biometric Personnel Enrollment Modal State
   const [showEnrollModal, setShowEnrollModal] = useState<boolean>(false);
@@ -515,6 +762,9 @@ export const App: React.FC = () => {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (isTeaPointModalOpen) {
+          setIsTeaPointModalOpen(false);
+        }
         if (isEvidenceModalOpen) {
           setIsEvidenceModalOpen(false);
         }
@@ -535,7 +785,26 @@ export const App: React.FC = () => {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [focusedCameraId, selectedCamForConfig, showEnrollModal, showSettingsModal, isEvidenceModalOpen]);
+  }, [focusedCameraId, selectedCamForConfig, showEnrollModal, showSettingsModal, isEvidenceModalOpen, isTeaPointModalOpen]);
+
+  // Handle IRIS AI Voice & Query Console programmatic commands (e.g., Pull up Camera 02)
+  useEffect(() => {
+    const handleIframeMessage = (event: MessageEvent) => {
+      if (!event.data || typeof event.data !== 'object') return;
+      if (event.data.type === 'FOCUS_CAMERA' && event.data.cameraId) {
+        setFocusedCameraId(event.data.cameraId);
+        setGridLayout('1x1');
+      } else if (event.data.type === 'SET_LAYOUT' && event.data.layout) {
+        const l = event.data.layout as GridLayout;
+        setGridLayout(l);
+        if (l !== '1x1') {
+          setFocusedCameraId(null);
+        }
+      }
+    };
+    window.addEventListener('message', handleIframeMessage);
+    return () => window.removeEventListener('message', handleIframeMessage);
+  }, []);
 
   // Infrastructure Probing
   const probeInfrastructure = useCallback(async () => {
@@ -600,23 +869,45 @@ export const App: React.FC = () => {
               return;
             }
 
+            if (data.type === 'UI_LAYOUT_COMMAND' || data.action === 'LAYOUT_CHANGE') {
+              const targetLayout = data.layout;
+              const targetCam = data.camera_id;
+              if (targetLayout === '1x1' && targetCam) {
+                setFocusedCameraId(targetCam);
+                setGridLayout('1x1');
+              } else if (targetLayout === '2x2') {
+                setFocusedCameraId(null);
+                setGridLayout('2x2');
+              } else if (targetLayout === '3x3') {
+                setFocusedCameraId(null);
+                setGridLayout('3x3');
+              }
+              return;
+            }
+
             if (data.type === 'TELEMETRY_UPDATE') {
               const camId = data.camera_id || data.camera;
               if (camId && data.counts) {
-                setCameras((prev) =>
-                  prev.map((c) =>
-                    c.id === camId
-                      ? {
-                          ...c,
-                          occupancy: data.counts.occupancy !== undefined ? data.counts.occupancy : c.occupancy,
-                          personCount: data.counts.persons !== undefined ? data.counts.persons : (data.counts.person_count !== undefined ? data.counts.person_count : (data.counts.occupancy !== undefined ? data.counts.occupancy : c.personCount)),
-                          entry: data.counts.entry !== undefined ? data.counts.entry : (data.counts.entries !== undefined ? data.counts.entries : c.entry),
-                          exit: data.counts.exit !== undefined ? data.counts.exit : (data.counts.exits !== undefined ? data.counts.exits : c.exit),
-                          fps: data.counts.fps || c.fps,
-                        }
-                      : c
-                  )
-                );
+                setCameras((prev) => {
+                  const updated = prev.map((c) => {
+                    if (c.id !== camId) return c;
+                    const detectedPersons = data.counts.persons !== undefined
+                      ? Number(data.counts.persons)
+                      : (data.counts.person_count !== undefined ? Number(data.counts.person_count) : 0);
+                    const rawOcc = data.counts.occupancy !== undefined ? Number(data.counts.occupancy) : 0;
+                    const effectiveOcc = rawOcc > 0 ? rawOcc : detectedPersons;
+                    return {
+                      ...c,
+                      occupancy: effectiveOcc,
+                      personCount: detectedPersons > 0 ? detectedPersons : effectiveOcc,
+                      entry: data.counts.entry !== undefined ? data.counts.entry : (data.counts.entries !== undefined ? data.counts.entries : c.entry),
+                      exit: data.counts.exit !== undefined ? data.counts.exit : (data.counts.exits !== undefined ? data.counts.exits : c.exit),
+                      fps: data.counts.fps || c.fps,
+                    };
+                  });
+                  checkCrowdGatheringRule(updated);
+                  return updated;
+                });
               }
               return;
             }
@@ -655,17 +946,21 @@ export const App: React.FC = () => {
 
               const camId = data.camera || data.camera_id;
               if (camId) {
-                setCameras((prev) =>
-                  prev.map((c) =>
-                    c.id === camId
-                      ? {
-                          ...c,
-                          occupancy: data.occupancy !== undefined ? data.occupancy : c.occupancy,
-                          personCount: data.person_count !== undefined ? data.person_count : (data.occupancy !== undefined ? data.occupancy : c.personCount),
-                        }
-                      : c
-                  )
-                );
+                setCameras((prev) => {
+                  const updated = prev.map((c) => {
+                    if (c.id !== camId) return c;
+                    const pCount = data.person_count !== undefined ? Number(data.person_count) : (c.personCount ?? 0);
+                    const rawOcc = data.occupancy !== undefined ? Number(data.occupancy) : (c.occupancy ?? 0);
+                    const effectiveOcc = rawOcc > 0 ? rawOcc : (pCount > 0 ? pCount : c.occupancy);
+                    return {
+                      ...c,
+                      occupancy: effectiveOcc,
+                      personCount: pCount > 0 ? pCount : effectiveOcc,
+                    };
+                  });
+                  checkCrowdGatheringRule(updated);
+                  return updated;
+                });
               }
             }
           } catch (e) {
@@ -1104,6 +1399,22 @@ export const App: React.FC = () => {
                         streamError={Boolean(streamErrors[cam.id])}
                         currentTimeString={cardTime}
                         currentDateString={cardDate}
+                        teaPointConfig={cam.id === 'CAM-05' ? teaPointConfig : undefined}
+                        teaPointCountdownSec={cam.id === 'CAM-05' ? teaPointCountdownSec : undefined}
+                        teaPointThresholdSec={cam.id === 'CAM-05' ? teaPointThresholdSec : undefined}
+                        teaPointIsOverstay={
+                          cam.id === 'CAM-05'
+                            ? Boolean(
+                                teaPointCountdownSec <= 0 &&
+                                  ((cam.occupancy && cam.occupancy > 0) || (cam.personCount && cam.personCount > 0))
+                              )
+                            : undefined
+                        }
+                        onOpenTeaPointModal={() => setIsTeaPointModalOpen(true)}
+                        onTriggerTeaPointException={handleTriggerTeaPointDemo}
+                        onResetTeaPointTimer={cam.id === 'CAM-05' ? handleResetTeaPointTimer : undefined}
+                        onTriggerFireHazard={cam.id === 'CAM-03' ? () => handleTriggerFireHazardDemo(cam.id) : undefined}
+                        onTriggerPPEViolation={cam.id === 'CAM-04' || cam.id === 'CAM-01' ? () => handleTriggerPPEViolation(cam.id) : undefined}
                         onConfigureClick={(c) => openConfigModal(c as CameraChannel)}
                         onFocusToggle={(c) => {
                           if (gridLayout === '1x1') {
@@ -1457,6 +1768,199 @@ export const App: React.FC = () => {
                 />
               </div>
             )}
+
+            {/* TAB CONTENT: SAFETY & PPE COMPLIANCE */}
+            {navTab === 'safety' && (
+              <div className="flex-1 flex flex-col gap-5">
+                {/* 1. Header Banner */}
+                <div className="bg-[#0b132b] rounded-2xl border border-[#162347] p-5 shadow-xl flex items-center justify-between flex-wrap gap-4">
+                  <div className="flex items-center gap-3.5">
+                    <div className="w-11 h-11 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center">
+                      <HardHat className="w-6 h-6 text-amber-400" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-lg font-bold text-white tracking-tight">
+                          Safety &amp; PPE Compliance Center
+                        </h2>
+                        <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                          YOLOv8 PPE Active
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        Autonomous OSHA Compliance Monitoring // Real-time Hardhat, Safety Vest &amp; Mask Classification
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Button
+                      onClick={() => handleTriggerPPEViolation('CAM-04')}
+                      className="bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-mono font-semibold h-9 px-3.5 rounded-xl flex items-center gap-1.5 cursor-pointer shadow-sm transition-colors"
+                      title="Trigger Simulated Safety Violation for Jury Inspection"
+                    >
+                      <HardHat className="w-4 h-4 text-amber-400" />
+                      <span>Simulate PPE Violation</span>
+                    </Button>
+                  </div>
+                </div>
+
+                {/* 2. Key Metrics Row */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="bg-[#0b132b] rounded-2xl border border-[#162347] p-4 flex flex-col justify-between shadow-lg">
+                    <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Overall Compliance</span>
+                    <div className="flex items-baseline gap-2 mt-2">
+                      <span className="text-2xl font-bold font-mono text-emerald-400">94.2%</span>
+                      <span className="text-[11px] text-emerald-500/80 font-medium">OSHA Optimal</span>
+                    </div>
+                    <div className="w-full bg-slate-800 rounded-full h-1.5 mt-3 overflow-hidden">
+                      <div className="bg-emerald-400 h-1.5 rounded-full" style={{ width: '94.2%' }} />
+                    </div>
+                  </div>
+
+                  <div className="bg-[#0b132b] rounded-2xl border border-[#162347] p-4 flex flex-col justify-between shadow-lg">
+                    <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Hardhat Compliance</span>
+                    <div className="flex items-baseline gap-2 mt-2">
+                      <span className="text-2xl font-bold font-mono text-white">96.5%</span>
+                      <span className="text-[11px] text-slate-400">Class 0 / 2</span>
+                    </div>
+                    <span className="text-[10px] text-emerald-400/90 font-mono mt-1">28 Verified // 1 Exception</span>
+                  </div>
+
+                  <div className="bg-[#0b132b] rounded-2xl border border-[#162347] p-4 flex flex-col justify-between shadow-lg">
+                    <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Safety Vest Compliance</span>
+                    <div className="flex items-baseline gap-2 mt-2">
+                      <span className="text-2xl font-bold font-mono text-white">91.8%</span>
+                      <span className="text-[11px] text-slate-400">Class 7 / 4</span>
+                    </div>
+                    <span className="text-[10px] text-amber-400 font-mono mt-1">High-Visibility Verified</span>
+                  </div>
+
+                  <div className="bg-[#0b132b] rounded-2xl border border-[#162347] p-4 flex flex-col justify-between shadow-lg">
+                    <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Active Safety Alerts</span>
+                    <div className="flex items-baseline gap-2 mt-2">
+                      <span className="text-2xl font-bold font-mono text-amber-400">
+                        {alerts.filter((a) => a.type.includes('PPE') || a.detail.toLowerCase().includes('gear')).length}
+                      </span>
+                      <span className="text-[11px] text-amber-500/80 font-medium">Violations</span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 font-mono mt-1">Real-time Anomaly Dispatch</span>
+                  </div>
+                </div>
+
+                {/* 3. Monitored Work Zones with PPE Requirements */}
+                <div className="bg-[#0b132b] rounded-2xl border border-[#162347] p-5 shadow-xl flex flex-col gap-4">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-bold text-white tracking-wide flex items-center gap-2">
+                      <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                      <span>Monitored Hazard Zones &amp; Required Equipment</span>
+                    </h3>
+                    <span className="text-[11px] font-mono text-slate-400">4 Active High-Risk Zones</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    {[
+                      { id: 'CAM-04', zone: 'Zone 02 // Precision Machining Line', hardhat: true, vest: true, mask: true, status: 'Active Surveillance' },
+                      { id: 'CAM-03', zone: 'Zone 03 // Logistics Yard North', hardhat: true, vest: true, mask: false, status: 'Active Surveillance' },
+                      { id: 'CAM-01', zone: 'Zone 01 // Main Turnstile North', hardhat: false, vest: true, mask: true, status: 'Access Check' },
+                      { id: 'CAM-06', zone: 'Zone 06 // Western Security Barrier', hardhat: true, vest: true, mask: false, status: 'Perimeter Check' },
+                    ].map((zoneCard) => (
+                      <div key={zoneCard.id} className="bg-[#0e1838] border border-[#162347] rounded-xl p-4 flex flex-col justify-between gap-3">
+                        <div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-white font-mono">{zoneCard.id}</span>
+                            <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                              {zoneCard.status}
+                            </span>
+                          </div>
+                          <span className="text-[11px] text-slate-300 font-medium block mt-1 line-clamp-1">{zoneCard.zone}</span>
+                        </div>
+
+                        <div className="flex flex-wrap gap-1.5">
+                          {zoneCard.hardhat && (
+                            <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 flex items-center gap-1">
+                              <HardHat className="w-2.5 h-2.5" />
+                              Hardhat Req
+                            </span>
+                          )}
+                          {zoneCard.vest && (
+                            <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                              <ShieldCheck className="w-2.5 h-2.5" />
+                              Vest Req
+                            </span>
+                          )}
+                        </div>
+
+                        <Button
+                          onClick={() => handleTriggerPPEViolation(zoneCard.id)}
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 text-[10px] font-mono w-full bg-slate-800/80 hover:bg-slate-700/80 text-slate-300 border border-slate-700 flex items-center justify-center gap-1"
+                        >
+                          <HardHat className="w-3 h-3 text-amber-400" />
+                          <span>Simulate Violation</span>
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 4. Filtered PPE Safety Violation Queue */}
+                <div className="bg-[#0b132b] rounded-2xl border border-[#162347] p-5 shadow-xl flex flex-col gap-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-bold text-white tracking-wide flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-400" />
+                      <span>PPE Safety Exception Queue</span>
+                    </h3>
+                    <span className="text-[11px] font-mono text-slate-400">
+                      {alerts.filter((a) => a.type.includes('PPE') || a.detail.toLowerCase().includes('hardhat')).length} Records
+                    </span>
+                  </div>
+
+                  <div className="divide-y divide-[#162347] max-h-96 overflow-y-auto">
+                    {alerts
+                      .filter((a) => a.type.includes('PPE') || a.detail.toLowerCase().includes('hardhat') || a.detail.toLowerCase().includes('vest'))
+                      .map((alert) => (
+                        <div key={alert.id} className="py-3 flex items-center justify-between gap-4">
+                          <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-full bg-amber-500/15 flex items-center justify-center shrink-0">
+                              <HardHat className="w-4 h-4 text-amber-400" />
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-bold text-white">{alert.type}</span>
+                                <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                                  {alert.camera}
+                                </span>
+                              </div>
+                              <p className="text-xs text-slate-400 mt-0.5">{alert.detail}</p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="text-[11px] font-mono text-slate-500">{alert.time}</span>
+                            {alert.snapshot_url && (
+                              <Button
+                                onClick={() => handleOpenEvidence(alert)}
+                                size="sm"
+                                variant="ghost"
+                                className="h-7 px-2 bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 border border-blue-500/30 text-[10px] font-mono"
+                              >
+                                View Evidence
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    {alerts.filter((a) => a.type.includes('PPE') || a.detail.toLowerCase().includes('hardhat') || a.detail.toLowerCase().includes('vest')).length === 0 && (
+                      <div className="py-8 text-center text-xs text-slate-500 font-mono">
+                        No active safety violations detected. All personnel compliant with site PPE protocols.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
           </main>
         )}
       </div>
@@ -1728,6 +2232,18 @@ export const App: React.FC = () => {
         activeAlert={selectedEvidenceAlert}
         initialTab={evidenceModalTab}
         backendUrl="http://127.0.0.1:8000"
+      />
+
+      {/* CAM-05 Tea Point Break Monitoring & Schedule Modal */}
+      <TeaPointControlModal
+        isOpen={isTeaPointModalOpen}
+        onClose={() => setIsTeaPointModalOpen(false)}
+        config={teaPointConfig}
+        countdownSec={teaPointCountdownSec}
+        currentDwellSec={Math.max(0, teaPointThresholdSec - teaPointCountdownSec)}
+        onResetTimer={handleResetTeaPointTimer}
+        onUpdateConfig={handleUpdateTeaPointConfig}
+        onTriggerDemoException={handleTriggerTeaPointDemo}
       />
     </div>
   );
