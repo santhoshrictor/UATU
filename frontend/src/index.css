@@ -1,13 +1,19 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
 :root {
-  --bg-base: #020617;
-  --bg-card: #0f172a;
-  --border-card: #1e293b;
+  --bg-base: #060b18;
+  --bg-sidebar: #080f22;
+  --bg-card: #0b132b;
+  --bg-card-header: #0e1838;
+  --border-card: #162347;
+  --border-subtle: #1e2f5f;
+  --brand-blue: #2563eb;
+  --brand-blue-hover: #1d4ed8;
   --accent-nominal: #10b981;
   --accent-warning: #f59e0b;
   --accent-critical: #ef4444;
-  --text-primary: #f8fafc;
+  --accent-info: #38bdf8;
+  --text-primary: #ffffff;
   --text-secondary: #94a3b8;
   --text-muted: #64748b;
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -21,7 +27,7 @@
 }
 
 body {
-  background-color: #020617;
+  background-color: #060b18;
   color: #f8fafc;
   font-family: var(--font-sans);
   line-height: 1.5;

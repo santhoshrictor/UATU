@@ -63,6 +63,9 @@ class AlertConnectionManager:
             or "TAILGATING" in msg_type
             or "ENROLL" in msg_type
             or "LAYOUT" in msg_type
+            or "TELEMETRY" in msg_type
+            or "CLEAR" in msg_type
+            or "RESET" in msg_type
         )
 
         if cam and not is_exempt and not self.is_stream_active(cam):
@@ -70,6 +73,47 @@ class AlertConnectionManager:
                 f"Circuit Breaker: Alert {message.get('id')} suppressed because {cam} is OFFLINE / UNASSIGNED."
             )
             return
+
+        # Automated Anomaly Snapshot Trigger: capture frame if missing for critical/anomalous alerts
+        if not message.get("snapshot_url"):
+            cam_id = message.get("camera_id") or message.get("camera")
+            etype = str(message.get("type", "")).upper()
+            mlevel = str(message.get("level") or message.get("severity") or "").upper()
+            is_anomaly = mlevel == "CRITICAL" or any(k in etype for k in ["FALL", "FIRE", "SMOKE", "HAZARD", "INTRUSION", "TAILGATING", "CROWD"])
+            if is_anomaly and cam_id:
+                try:
+                    import cv2
+                    import numpy as np
+                    from backend.app.main import multi_webcam_manager, multi_file_stream_manager
+                    from backend.app.live_event_store import live_event_store
+
+                    frame = None
+                    for wid, w in multi_webcam_manager.workers.items():
+                        if w.camera_id == cam_id and w.is_live:
+                            raw = w.get_latest_jpeg()
+                            if raw:
+                                frame = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+                                break
+                    if frame is None:
+                        for wid, w in multi_file_stream_manager.workers.items():
+                            if w.camera_id == cam_id and w.running:
+                                raw = w.get_latest_jpeg()
+                                if raw:
+                                    frame = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+                                    break
+
+                    if frame is not None:
+                        snap_url = live_event_store.save_event_snapshot(
+                            event_id=message.get("id") or message.get("event_id") or f"EVT-SNAP-{int(time.time()*1000)}",
+                            frame=frame,
+                            camera_id=cam_id,
+                            event_type=message.get("type", "ANOMALY"),
+                            zone=message.get("zone", ""),
+                        )
+                        if snap_url:
+                            message["snapshot_url"] = snap_url
+                except Exception as ex:
+                    logger.debug(f"Automated frame capture note: {ex}")
 
         # Auto-record in LiveEventStore if not already recorded
         try:

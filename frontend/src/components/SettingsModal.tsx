@@ -9,6 +9,7 @@ import {
   Lock,
 } from 'lucide-react';
 import { FortressAuditModal } from './FortressAuditModal';
+import { Button } from './ui/button';
 
 export interface SettingsModalProps {
   isOpen: boolean;
@@ -58,14 +59,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </p>
             </div>
           </div>
-          <button
+          <Button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-slate-400 hover:text-white"
             title="Close Settings"
             aria-label="Close Settings"
           >
             <X className="w-5 h-5" />
-          </button>
+          </Button>
         </div>
 
         {/* Modal Body: 2 Primary Options */}
@@ -88,17 +91,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
 
               <div className="pt-5 mt-4 border-t border-slate-800/80">
-                <button
+                <Button
                   type="button"
                   onClick={() => {
                     onClose();
                     onOpenEnroll();
                   }}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-slate-950 font-semibold text-xs uppercase tracking-wider font-mono transition-all shadow-lg shadow-emerald-950/40"
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs tracking-wider font-mono shadow-lg shadow-emerald-950/40"
                 >
                   <UserPlus className="w-4 h-4" />
                   <span>Launch Enrollment</span>
-                </button>
+                </Button>
               </div>
             </div>
 
@@ -131,15 +134,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <span>Requires SuperAdmin OTP &amp; Hardware Fingerprint</span>
                 </div>
 
-                <button
+                <Button
                   type="button"
                   onClick={() => setShowFortressModal(true)}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-slate-950 font-semibold text-xs uppercase tracking-wider font-mono transition-all shadow-lg shadow-amber-950/40"
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs tracking-wider font-mono shadow-lg shadow-amber-950/40"
                   title="Verify SuperAdmin Credentials & Contextual OTP to Export Audit Logs"
                 >
                   <Shield className="w-4 h-4" />
                   <span>Fortress Preview &amp; Export</span>
-                </button>
+                </Button>
               </div>
             </div>
           </div>
@@ -151,12 +154,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
             <span>Audit integrity: ISO-27001 compliant immutable event logging</span>
           </div>
-          <button
+          <Button
             onClick={onClose}
-            className="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
+            variant="secondary"
+            size="sm"
+            className="h-7 px-3 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700"
           >
             Close
-          </button>
+          </Button>
         </div>
       </div>
 

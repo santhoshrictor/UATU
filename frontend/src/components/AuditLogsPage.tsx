@@ -20,6 +20,7 @@ import {
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react';
+import { Button } from './ui/button';
 
 export interface AuditRecord {
   id: string;
@@ -243,14 +244,16 @@ export const AuditLogsPage: React.FC<AuditLogsPageProps> = ({
         <div className="max-w-[1920px] mx-auto flex flex-wrap items-center justify-between gap-4">
           {/* Left: Brand & Return Navigation */}
           <div className="flex items-center gap-3">
-            <button
+            <Button
               onClick={onBackToMultiview}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition-all text-xs font-mono font-semibold group"
+              variant="secondary"
+              size="sm"
+              className="flex items-center gap-2 h-8 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-xs font-mono font-semibold group"
               title="Return to 9-Camera Operational Multiview"
             >
               <ArrowLeft className="w-4 h-4 text-emerald-400 group-hover:-translate-x-0.5 transition-transform" />
               <span>Back to Multiview</span>
-            </button>
+            </Button>
 
             <div className="h-5 w-[1px] bg-slate-800 hidden sm:block" />
 
@@ -281,15 +284,16 @@ export const AuditLogsPage: React.FC<AuditLogsPageProps> = ({
               <span className="text-emerald-400 font-semibold">Trust: {trustScore}/100</span>
             </div>
 
-            <button
+            <Button
               onClick={handleExportCSV}
               disabled={isExporting || records.length === 0}
-              className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 disabled:opacity-50 text-slate-950 font-semibold text-xs uppercase tracking-wider font-mono transition-all shadow-lg shadow-emerald-950/40"
+              size="sm"
+              className="flex items-center gap-2 h-8 px-3.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold text-xs tracking-wider font-mono shadow-lg shadow-emerald-950/40"
               title="Export displayed audit logs to CSV"
             >
               <Download className="w-3.5 h-3.5" />
               <span>{isExporting ? 'Exporting...' : 'Export CSV'}</span>
-            </button>
+            </Button>
           </div>
         </div>
       </header>
@@ -361,14 +365,16 @@ export const AuditLogsPage: React.FC<AuditLogsPageProps> = ({
               )}
             </div>
 
-            <button
+            <Button
               onClick={fetchRecords}
               disabled={isLoading}
-              className="p-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white transition-colors"
+              variant="secondary"
+              size="icon"
+              className="h-8 w-8 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white"
               title="Refresh Audit Records"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-emerald-400' : ''}`} />
-            </button>
+            </Button>
           </div>
 
           {/* Records Counter */}
@@ -505,14 +511,16 @@ export const AuditLogsPage: React.FC<AuditLogsPageProps> = ({
 
                     {/* Metadata Button */}
                     <td className="py-3 px-4 text-right whitespace-nowrap">
-                      <button
+                      <Button
                         onClick={() => setSelectedRecordForModal(rec)}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white transition-colors text-[11px]"
+                        variant="secondary"
+                        size="sm"
+                        className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white text-[11px] font-mono"
                         title="Inspect full JSON telemetry payload"
                       >
                         <Eye className="w-3 h-3 text-cyan-400" />
                         <span>Inspect</span>
-                      </button>
+                      </Button>
                     </td>
                   </tr>
                 ))
@@ -564,12 +572,14 @@ export const AuditLogsPage: React.FC<AuditLogsPageProps> = ({
                   Audit Telemetry Payload ({selectedRecordForModal.id})
                 </h3>
               </div>
-              <button
+              <Button
                 onClick={() => setSelectedRecordForModal(null)}
-                className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-white"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 text-slate-400 hover:text-white"
               >
                 <X className="w-4 h-4" />
-              </button>
+              </Button>
             </div>
 
             <div className="p-6 overflow-y-auto space-y-4 font-mono text-xs">
@@ -614,12 +624,14 @@ export const AuditLogsPage: React.FC<AuditLogsPageProps> = ({
             </div>
 
             <div className="px-6 py-3 border-t border-slate-800 bg-slate-950/60 flex items-center justify-end">
-              <button
+              <Button
                 onClick={() => setSelectedRecordForModal(null)}
-                className="px-4 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono text-xs transition-colors"
+                variant="secondary"
+                size="sm"
+                className="h-7 px-4 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono text-xs border border-slate-700"
               >
                 Close Inspector
-              </button>
+              </Button>
             </div>
           </div>
         </div>

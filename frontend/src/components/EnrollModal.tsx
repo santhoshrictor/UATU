@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Camera, RefreshCw, UserCheck, X, CheckCircle2, XCircle } from 'lucide-react';
+import { Button } from './ui/button';
 
 export interface EnrollModalProps {
   showEnrollModal: boolean;
@@ -95,16 +96,18 @@ export const EnrollModal: React.FC<EnrollModalProps> = ({
               </p>
             </div>
           </div>
-          <button
+          <Button
             onClick={() => {
               setShowEnrollModal(false);
               setEnrollFeedback(null);
             }}
-            className="text-slate-400 hover:text-slate-200 p-1.5 rounded hover:bg-slate-800 transition-colors"
+            variant="ghost"
+            size="icon"
+            className="text-slate-400 hover:text-slate-200 h-8 w-8"
             title="Close Modal"
           >
             <X className="w-5 h-5" />
-          </button>
+          </Button>
         </div>
 
         {/* Modal Body: Viewfinder + Form Inputs */}
@@ -299,25 +302,28 @@ export const EnrollModal: React.FC<EnrollModalProps> = ({
             Storage: <span className="text-slate-400">mock_employee_db.pkl</span> (512-d normalized)
           </span>
           <div className="flex items-center gap-2 ml-auto">
-            <button
+            <Button
               type="button"
               onClick={() => {
                 setShowEnrollModal(false);
                 setEnrollFeedback(null);
               }}
               disabled={enrollLoading}
-              className="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-xs font-mono transition-colors disabled:opacity-50"
+              variant="secondary"
+              size="sm"
+              className="px-4 py-2 h-9 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-xs font-mono disabled:opacity-50"
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               onClick={() => handleEnrollSubmit()}
               disabled={!isFaceAligned || enrollLoading}
-              className={`flex items-center gap-2 px-5 py-2 rounded-lg font-mono text-xs font-semibold shadow-lg transition-all duration-200 ${
+              size="sm"
+              className={`flex items-center gap-2 px-5 py-2 h-9 rounded-lg font-mono text-xs font-semibold shadow-lg transition-all duration-200 ${
                 isFaceAligned && !enrollLoading
-                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-950/50 hover:shadow-emerald-900/60 hover:scale-[1.02] cursor-pointer'
-                  : 'bg-slate-800 text-slate-500 border border-slate-700/60 cursor-not-allowed opacity-50'
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-950/50 cursor-pointer'
+                  : 'bg-slate-800 text-slate-500 cursor-not-allowed opacity-50'
               }`}
               title={
                 isFaceAligned
@@ -336,7 +342,7 @@ export const EnrollModal: React.FC<EnrollModalProps> = ({
                   Capture &amp; Enroll
                 </>
               )}
-            </button>
+            </Button>
           </div>
         </div>
       </div>

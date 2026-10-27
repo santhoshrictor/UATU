@@ -1,31 +1,32 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  ShieldCheck,
-  Video,
-  AlertTriangle,
   CreditCard,
-  Server,
-  Database,
   RefreshCw,
   CheckCircle2,
   XCircle,
-  Clock,
-  Settings,
-  Maximize2,
-  Minimize2,
+  AlertTriangle,
+  Camera,
+  X,
+  ChevronDown,
   Grid,
   LayoutGrid,
+  List,
+  MapPin,
+  ShieldCheck,
   Upload,
-  Camera,
-  Radio,
-  X,
-  Plus,
 } from 'lucide-react';
 import { EnrollModal } from './components/EnrollModal';
 import { SettingsModal } from './components/SettingsModal';
 import { AuditLogsPage } from './components/AuditLogsPage';
-import { UATUVoiceAssistantLauncher } from './components/UATUVoiceAssistantLauncher';
 import { IncidentQueue, type IncidentAlert, type AlertSeverity } from './components/IncidentQueue';
+import { LeftSidebar, type NavTabId } from './components/LeftSidebar';
+import { TopHeader } from './components/TopHeader';
+import { CameraCard, type CameraCardData } from './components/CameraCard';
+import { RecentAlertsPanel } from './components/RecentAlertsPanel';
+import { EvidenceModal } from './components/EvidenceModal';
+import { Button } from './components/ui/button';
+import { FlowButton } from './components/ui/flow-button';
+import { UATUVoiceAssistantLauncher } from './components/UATUVoiceAssistantLauncher';
 
 /* =========================================================================
    TYPE DEFINITIONS
@@ -33,22 +34,10 @@ import { IncidentQueue, type IncidentAlert, type AlertSeverity } from './compone
 
 type AccessVerdict = 'AUTHORIZED' | 'MISMATCH' | 'TAILGATING';
 type GridLayout = '1x1' | '2x2' | '3x3';
-type StreamSourceType = 'WEBCAM' | 'BACKEND_LOOP' | 'CUSTOM_UPLOAD' | 'STANDBY';
+type ViewMode = 'grid' | 'list' | 'map';
 
-interface CameraChannel {
-  id: string;
-  name: string;
-  zone: string;
-  sourceType: StreamSourceType;
-  streamUrl: string;
+interface CameraChannel extends CameraCardData {
   customFileName?: string;
-  deviceId?: number;
-  isOnline: boolean;
-  fps: number;
-  resolution: string;
-  entry?: number;
-  exit?: number;
-  occupancy?: number;
 }
 
 interface AccessEvent {
@@ -74,15 +63,19 @@ interface InfraStatus {
 }
 
 /* =========================================================================
-   TIME UTILITIES (MODULE-LEVEL FOR REACT COMPILER PURITY)
+   TIME UTILITIES
    ========================================================================= */
 
 function formatUtcTime(): string {
   return new Date().toLocaleTimeString('en-US', { hour12: false }) + ' UTC';
 }
 
-function formatUtcIso(): string {
-  return new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+function formatCardDate(): string {
+  return new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+function formatCardTime(): string {
+  return new Date().toLocaleTimeString('en-US', { hour12: false });
 }
 
 /* =========================================================================
@@ -92,7 +85,7 @@ function formatUtcIso(): string {
 const INITIAL_CAMERAS: CameraChannel[] = [
   {
     id: 'CAM-01',
-    name: 'Laptop Live Webcam (Physical)',
+    name: 'Main Entrance',
     zone: 'Zone 01 // Main Turnstile North',
     sourceType: 'WEBCAM',
     deviceId: 0,
@@ -100,10 +93,13 @@ const INITIAL_CAMERAS: CameraChannel[] = [
     isOnline: true,
     fps: 30,
     resolution: '640x480',
+    occupancy: 0,
+    entry: 0,
+    exit: 0,
   },
   {
     id: 'CAM-02',
-    name: 'Mobile Webcam (Iriun / Device 1)',
+    name: 'Production Floor',
     zone: 'Zone 01 // Optical Turnstile B',
     sourceType: 'WEBCAM',
     deviceId: 1,
@@ -111,26 +107,35 @@ const INITIAL_CAMERAS: CameraChannel[] = [
     isOnline: true,
     fps: 30,
     resolution: '640x480',
+    occupancy: 0,
+    entry: 0,
+    exit: 0,
   },
   {
     id: 'CAM-03',
-    name: 'Entry Portal Loop',
+    name: 'Warehouse',
     zone: 'Zone 03 // Logistics Yard North',
     sourceType: 'BACKEND_LOOP',
     streamUrl: 'http://127.0.0.1:8000/api/video-stream',
     isOnline: false,
     fps: 0,
     resolution: '1080p',
+    occupancy: 0,
+    entry: 0,
+    exit: 0,
   },
   {
     id: 'CAM-04',
-    name: 'Workshop Floor 2',
+    name: 'Loading Dock',
     zone: 'Zone 02 // Precision Machining Line',
     sourceType: 'STANDBY',
     streamUrl: '',
     isOnline: false,
     fps: 0,
     resolution: '1080p',
+    occupancy: 0,
+    entry: 0,
+    exit: 0,
   },
   {
     id: 'CAM-05',
@@ -141,6 +146,9 @@ const INITIAL_CAMERAS: CameraChannel[] = [
     isOnline: false,
     fps: 0,
     resolution: '4K UHD',
+    occupancy: 0,
+    entry: 0,
+    exit: 0,
   },
   {
     id: 'CAM-06',
@@ -151,6 +159,9 @@ const INITIAL_CAMERAS: CameraChannel[] = [
     isOnline: false,
     fps: 0,
     resolution: '1080p',
+    occupancy: 0,
+    entry: 0,
+    exit: 0,
   },
   {
     id: 'CAM-07',
@@ -161,6 +172,9 @@ const INITIAL_CAMERAS: CameraChannel[] = [
     isOnline: false,
     fps: 0,
     resolution: '1080p',
+    occupancy: 0,
+    entry: 0,
+    exit: 0,
   },
   {
     id: 'CAM-08',
@@ -171,6 +185,9 @@ const INITIAL_CAMERAS: CameraChannel[] = [
     isOnline: false,
     fps: 0,
     resolution: '1080p',
+    occupancy: 0,
+    entry: 0,
+    exit: 0,
   },
   {
     id: 'CAM-09',
@@ -181,6 +198,9 @@ const INITIAL_CAMERAS: CameraChannel[] = [
     isOnline: false,
     fps: 0,
     resolution: '1080p',
+    occupancy: 0,
+    entry: 0,
+    exit: 0,
   },
 ];
 
@@ -197,7 +217,6 @@ const INITIAL_ACCESS_EVENT: AccessEvent = {
   occupancyDetected: 0,
 };
 
-// 100% Zero-Fake-Data: Clean empty initial alerts queue
 const INITIAL_ALERTS: IncidentAlert[] = [];
 
 /* =========================================================================
@@ -205,6 +224,12 @@ const INITIAL_ALERTS: IncidentAlert[] = [];
    ========================================================================= */
 
 export const App: React.FC = () => {
+  // Navigation & View State
+  const [navTab, setNavTab] = useState<NavTabId>('live');
+  const [viewMode, setViewMode] = useState<ViewMode>('grid');
+  const [cameraFilter, setCameraFilter] = useState<string>('ALL');
+  const [searchFilter, setSearchFilter] = useState<string>('');
+
   // Backend & Database Infrastructure Telemetry
   const [infra, setInfra] = useState<InfraStatus>({
     backendOnline: false,
@@ -214,11 +239,11 @@ export const App: React.FC = () => {
     lastProbeTime: null,
     probeError: null,
   });
-  const [isProbing, setIsProbing] = useState<boolean>(false);
-  const [currentTime, setCurrentTime] = useState<string>(formatUtcIso);
+  const [cardTime, setCardTime] = useState<string>(formatCardTime);
+  const [cardDate, setCardDate] = useState<string>(formatCardDate);
 
   // Grid Layout State (1x1 Focus View, 2x2 Quad View, 3x3 Matrix View)
-  const [gridLayout, setGridLayout] = useState<GridLayout>('3x3');
+  const [gridLayout, setGridLayout] = useState<GridLayout>('2x2');
   const [focusedCameraId, setFocusedCameraId] = useState<string | null>(null);
 
   // 9-Camera System State
@@ -232,13 +257,69 @@ export const App: React.FC = () => {
   const openConfigModal = (cam: CameraChannel) => {
     setSelectedCamForConfig(cam);
     setModalDeviceId(cam.deviceId ?? 0);
+    setUploadMessage(null);
+  };
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || !selectedCamForConfig) return;
+
+    setUploadLoading(true);
+    setUploadMessage(null);
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const response = await fetch('http://127.0.0.1:8000/api/upload-video', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Upload failed with HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      const streamUrl = `http://127.0.0.1:8000${data.stream_url}?camera=${encodeURIComponent(
+        selectedCamForConfig.id
+      )}&zone=${encodeURIComponent(selectedCamForConfig.zone)}`;
+
+      const targetId = selectedCamForConfig.id;
+      setCameras((prev) =>
+        prev.map((c) =>
+          c.id === targetId
+            ? {
+                ...c,
+                sourceType: 'CUSTOM_UPLOAD',
+                streamUrl,
+                customFileName: file.name,
+                isOnline: true,
+              }
+            : c
+        )
+      );
+
+      setUploadMessage(`Success: Assigned custom stream for ${file.name}`);
+      setTimeout(() => {
+        setSelectedCamForConfig(null);
+        setUploadMessage(null);
+      }, 1200);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Upload Error';
+      setUploadMessage(`Error: ${msg}`);
+    } finally {
+      setUploadLoading(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
   };
 
   // Auto-recovery / reconnect tracking per camera
   const [streamErrors, setStreamErrors] = useState<Record<string, boolean>>({});
-  const [reconnectTicks, setReconnectTicks] = useState<Record<string, number>>({});
 
-  // Access Control Simulation & Alert State (Persists across page refreshes and navigation until manual reset)
+  // Access Control Simulation & Alert State
   const [currentAccess, setCurrentAccess] = useState<AccessEvent>(INITIAL_ACCESS_EVENT);
   const [alerts, setAlerts] = useState<IncidentAlert[]>(() => {
     try {
@@ -265,34 +346,66 @@ export const App: React.FC = () => {
     }
   }, [alerts]);
 
-  // Synchronize Incident Dispatch Queue on initial mount with LiveEventStore
+  // Synchronize Incident Dispatch Queue and Live Camera Telemetry
   useEffect(() => {
+    let isMounted = true;
     const fetchLiveEvents = async () => {
       try {
         const res = await fetch('http://127.0.0.1:8000/api/live-events');
-        if (res.ok) {
+        if (res.ok && isMounted) {
           const data = await res.json();
           if (Array.isArray(data.events)) {
-            const mappedAlerts: IncidentAlert[] = data.events.map((ev: any) => ({
-              id: ev.event_id || ev.id,
-              time: ev.time || ev.timestamp_ist || '00:00:00 IST',
-              zone: ev.zone || 'Facility Zone',
-              camera: ev.camera_id || ev.camera || 'CAM-01',
-              type: ev.event_type || ev.type || 'SECURITY_ALERT',
-              level: (ev.alarm_class || ev.level || 'INFO').toUpperCase() as any,
-              detail: ev.detail || '',
-              snapshot_url: ev.snapshot_url || '',
-              acknowledged: Boolean(ev.acknowledged),
-              acknowledgedAt: ev.acknowledged_at_ist || undefined,
-            }));
+            const mappedAlerts: IncidentAlert[] = data.events.map((ev: any) => {
+              const sev = (ev.alarm_class || ev.level || ev.severity || 'WARNING').toUpperCase() as AlertSeverity;
+              const ts = ev.timestamp_ist || ev.timestamp || ev.time || '00:00:00 IST';
+              return {
+                id: ev.event_id || ev.id,
+                timestamp: ts,
+                time: ev.time || ts,
+                zone: ev.zone || 'Facility Zone',
+                camera: ev.camera_id || ev.camera || 'CAM-01',
+                type: ev.event_type || ev.type || 'SECURITY_ALERT',
+                severity: sev,
+                level: sev,
+                detail: ev.detail || ev.message || '',
+                snapshot_url: ev.snapshot_url || '',
+                confidence_pct: ev.confidence_pct,
+                acknowledged: Boolean(ev.acknowledged),
+                acknowledgedAt: ev.acknowledged_at_ist || undefined,
+                eventRef: ev.event_ref,
+              };
+            });
             setAlerts(mappedAlerts);
+          }
+          const telemMap = data.camera_telemetry || data.telemetry;
+          if (telemMap && typeof telemMap === 'object') {
+            setCameras((prev) =>
+              prev.map((c) => {
+                const telem = telemMap[c.id];
+                if (!telem) return c;
+                return {
+                  ...c,
+                  occupancy: telem.occupancy !== undefined ? telem.occupancy : c.occupancy,
+                  personCount: telem.person_count !== undefined ? telem.person_count : (telem.occupancy !== undefined ? telem.occupancy : c.personCount),
+                  entry: telem.entry_count !== undefined ? telem.entry_count : c.entry,
+                  exit: telem.exit_count !== undefined ? telem.exit_count : c.exit,
+                  fps: telem.fps !== undefined && telem.fps > 0 ? telem.fps : c.fps,
+                };
+              })
+            );
           }
         }
       } catch (err) {
-        console.debug('[UATU Alert Bridge] Initial live events fetch notice:', err);
+        console.debug('[UATU Alert Bridge] Live events telemetry notice:', err);
       }
     };
+
     fetchLiveEvents();
+    const interval = setInterval(fetchLiveEvents, 1500);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   // System Settings & Audit Log Modal State
@@ -323,6 +436,23 @@ export const App: React.FC = () => {
       sessionStorage.removeItem('uatu_fortress_session');
     }
   }, [fortressSession]);
+
+  // Evidence Snapshot & Forensic Gallery Modal State
+  const [selectedEvidenceAlert, setSelectedEvidenceAlert] = useState<IncidentAlert | null>(null);
+  const [isEvidenceModalOpen, setIsEvidenceModalOpen] = useState<boolean>(false);
+  const [evidenceModalTab, setEvidenceModalTab] = useState<'INSPECT' | 'GALLERY'>('INSPECT');
+
+  const handleOpenEvidence = useCallback((alert: IncidentAlert) => {
+    setSelectedEvidenceAlert(alert);
+    setEvidenceModalTab('INSPECT');
+    setIsEvidenceModalOpen(true);
+  }, []);
+
+  const handleOpenEvidenceGallery = useCallback(() => {
+    setSelectedEvidenceAlert(null);
+    setEvidenceModalTab('GALLERY');
+    setIsEvidenceModalOpen(true);
+  }, []);
 
   // Live Biometric Personnel Enrollment Modal State
   const [showEnrollModal, setShowEnrollModal] = useState<boolean>(false);
@@ -372,26 +502,25 @@ export const App: React.FC = () => {
     refreshEnrolledUsers();
   }, [refreshEnrolledUsers]);
 
-
-  /* -----------------------------------------------------------------------
-     1. Live System UTC Clock
-     ----------------------------------------------------------------------- */
+  // Live System Clocks
   useEffect(() => {
     const interval = setInterval(() => {
-      setCurrentTime(formatUtcIso());
+      setCardTime(formatCardTime());
+      setCardDate(formatCardDate());
     }, 1000);
     return () => clearInterval(interval);
   }, []);
 
-  /* -----------------------------------------------------------------------
-     2. Escape Key Fullscreen/Focus Handler
-     ----------------------------------------------------------------------- */
+  // Escape Key Focus Handler
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (isEvidenceModalOpen) {
+          setIsEvidenceModalOpen(false);
+        }
         if (focusedCameraId) {
           setFocusedCameraId(null);
-          setGridLayout('3x3');
+          setGridLayout('2x2');
         }
         if (selectedCamForConfig) {
           setSelectedCamForConfig(null);
@@ -399,332 +528,247 @@ export const App: React.FC = () => {
         if (showEnrollModal) {
           setShowEnrollModal(false);
         }
+        if (showSettingsModal) {
+          setShowSettingsModal(false);
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [focusedCameraId, selectedCamForConfig, showEnrollModal]);
+  }, [focusedCameraId, selectedCamForConfig, showEnrollModal, showSettingsModal, isEvidenceModalOpen]);
 
-  /* -----------------------------------------------------------------------
-     2b. Real-time AI Incident WebSocket Bridge (/ws/alerts)
-     ----------------------------------------------------------------------- */
+  // Infrastructure Probing
+  const probeInfrastructure = useCallback(async () => {
+    const start = performance.now();
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+
+      const res = await fetch('http://127.0.0.1:8000/', {
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      const latency = performance.now() - start;
+
+      if (res.ok) {
+        const data = await res.json();
+        setInfra({
+          backendOnline: true,
+          postgresActive: true,
+          dbLatencyMs: latency,
+          serverVersion: data.version || '1.0.0',
+          lastProbeTime: formatUtcTime(),
+          probeError: null,
+        });
+      } else {
+        throw new Error(`HTTP ${res.status}`);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Connection failed';
+      setInfra((prev) => ({
+        ...prev,
+        backendOnline: false,
+        postgresActive: false,
+        lastProbeTime: formatUtcTime(),
+        probeError: msg,
+      }));
+    }
+  }, []);
+
+  useEffect(() => {
+    probeInfrastructure();
+    const interval = setInterval(probeInfrastructure, 15000);
+    return () => clearInterval(interval);
+  }, [probeInfrastructure]);
+
+  // WebSocket Live Alert Stream & Telemetry
   useEffect(() => {
     let ws: WebSocket | null = null;
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let isDisposed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout>;
 
-    const connectAlertWs = () => {
+    const connectWs = () => {
       try {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const host = window.location.hostname || '127.0.0.1';
-        const wsUrl = `${protocol}//${host}:8000/ws/alerts`;
-        ws = new WebSocket(wsUrl);
-
-        ws.onopen = () => {
-          console.log('[UATU Alert Bridge] Connected to WebSocket alert stream:', wsUrl);
-        };
+        ws = new WebSocket('ws://127.0.0.1:8000/ws/alerts');
 
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
-            // Handle Spatial & Layout Control Commands (dispatched by IRIS voice assistant)
-            if (data && (data.action === 'LAYOUT_CHANGE' || data.type === 'UI_LAYOUT_COMMAND')) {
-              console.log('[UATU Spatial Control] Received layout command:', data);
-              if (data.layout && ['1x1', '2x2', '3x3'].includes(data.layout)) {
-                setGridLayout(data.layout as GridLayout);
-              }
-              if (data.camera_id) {
-                setFocusedCameraId(data.camera_id);
+            if (data.type === 'ALERTS_CLEARED') {
+              setAlerts([]);
+              localStorage.removeItem('uatu_incident_queue');
+              return;
+            }
+
+            if (data.type === 'TELEMETRY_UPDATE') {
+              const camId = data.camera_id || data.camera;
+              if (camId && data.counts) {
+                setCameras((prev) =>
+                  prev.map((c) =>
+                    c.id === camId
+                      ? {
+                          ...c,
+                          occupancy: data.counts.occupancy !== undefined ? data.counts.occupancy : c.occupancy,
+                          personCount: data.counts.persons !== undefined ? data.counts.persons : (data.counts.person_count !== undefined ? data.counts.person_count : (data.counts.occupancy !== undefined ? data.counts.occupancy : c.personCount)),
+                          entry: data.counts.entry !== undefined ? data.counts.entry : (data.counts.entries !== undefined ? data.counts.entries : c.entry),
+                          exit: data.counts.exit !== undefined ? data.counts.exit : (data.counts.exits !== undefined ? data.counts.exits : c.exit),
+                          fps: data.counts.fps || c.fps,
+                        }
+                      : c
+                  )
+                );
               }
               return;
             }
-            if (data && data.type) {
-              const incomingAlert: IncidentAlert = {
-                id: data.id || `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
-                timestamp: data.time || data.timestamp || formatUtcTime(),
-                camera: data.camera,
-                zone: data.zone || 'Live Monitoring Zone',
-                type: data.type,
-                severity: (data.level || data.severity || 'CRITICAL') as AlertSeverity,
-                detail: data.detail || 'Spatial AI alert triggered by computer vision engine.',
-                acknowledged: false,
-                eventRef: data.id,
+
+            // Real-Time Detection Alert Received
+            if (data.id || data.event_id || data.type || data.alert_type) {
+              const alertId = String(data.id || data.event_id || `EVT-${Date.now()}`);
+              const alertType = String(data.alert_type || data.type || data.event_type || 'SECURITY BREACH');
+              const sev = (data.alarm_class || data.level || data.severity || 'WARNING').toUpperCase() as AlertSeverity;
+              const ts = data.timestamp_ist || data.time || data.timestamp || new Date().toLocaleTimeString('en-US', { hour12: false }) + ' IST';
+              const newAlert: IncidentAlert = {
+                id: alertId,
+                timestamp: ts,
+                time: data.time || ts,
+                zone: data.zone || 'Facility Zone',
+                camera: data.camera || data.camera_id || 'CAM-01',
+                type: alertType,
+                severity: sev,
+                level: sev,
+                detail: data.detail || data.message || 'Automated sensor event triggered.',
+                snapshot_url: data.snapshot_url || '',
+                confidence_pct: data.confidence_pct,
+                acknowledged: Boolean(data.acknowledged),
+                eventRef: data.event_ref,
               };
+
               setAlerts((prev) => {
-                if (prev.some((a) => a.id === incomingAlert.id)) {
-                  return prev;
+                const existingIdx = prev.findIndex((a) => a.id === alertId);
+                if (existingIdx >= 0) {
+                  const updated = [...prev];
+                  updated[existingIdx] = { ...updated[existingIdx], ...newAlert };
+                  return updated;
                 }
-                const updated = [incomingAlert, ...prev];
-                try {
-                  localStorage.setItem('uatu_incident_queue', JSON.stringify(updated));
-                } catch {}
-                return updated;
+                return [newAlert, ...prev];
               });
+
+              const camId = data.camera || data.camera_id;
+              if (camId) {
+                setCameras((prev) =>
+                  prev.map((c) =>
+                    c.id === camId
+                      ? {
+                          ...c,
+                          occupancy: data.occupancy !== undefined ? data.occupancy : c.occupancy,
+                          personCount: data.person_count !== undefined ? data.person_count : (data.occupancy !== undefined ? data.occupancy : c.personCount),
+                        }
+                      : c
+                  )
+                );
+              }
             }
-          } catch (err) {
-            console.error('[UATU Alert Bridge] Error parsing WebSocket message:', err);
+          } catch (e) {
+            console.error('Failed to parse WebSocket message:', e);
           }
         };
 
         ws.onclose = () => {
-          if (!isDisposed) {
-            reconnectTimer = setTimeout(connectAlertWs, 3000);
-          }
+          reconnectTimer = setTimeout(connectWs, 3000);
         };
-
         ws.onerror = () => {
           ws?.close();
         };
       } catch (err) {
-        if (!isDisposed) {
-          reconnectTimer = setTimeout(connectAlertWs, 3000);
-        }
+        reconnectTimer = setTimeout(connectWs, 3000);
       }
     };
 
-    connectAlertWs();
-
+    connectWs();
     return () => {
-      isDisposed = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
+      clearTimeout(reconnectTimer);
       if (ws) ws.close();
     };
   }, []);
 
-  /* -----------------------------------------------------------------------
-     3. Stream Reconnect / Recovery Timer (Ticks every 3s on error)
-     ----------------------------------------------------------------------- */
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const activeErrors = Object.entries(streamErrors).filter(([, hasErr]) => hasErr);
-      if (activeErrors.length > 0) {
-        setReconnectTicks((prev) => {
-          const now = Date.now();
-          const nextTicks = { ...prev };
-          activeErrors.forEach(([camId]) => {
-            nextTicks[camId] = now;
-          });
-          return nextTicks;
-        });
-      }
-    }, 3000);
-    return () => clearInterval(interval);
-  }, [streamErrors]);
-
-  /* -----------------------------------------------------------------------
-     4. Infrastructure Health Probe (15s Polling)
-     ----------------------------------------------------------------------- */
-  const probeInfrastructure = useCallback(async () => {
-    setIsProbing(true);
-    const probeTimestamp = formatUtcTime();
-
+  // Alert Reset
+  const handleResetAlerts = async () => {
+    setAlerts([]);
+    localStorage.removeItem('uatu_incident_queue');
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2500);
-
-      const readyRes = await fetch('http://127.0.0.1:8000/api/v1/health/ready', {
-        signal: controller.signal,
-      }).catch(async () => {
-        return await fetch('http://127.0.0.1:8000/docs', {
-          signal: controller.signal,
-          method: 'HEAD',
-        });
-      });
-
-      clearTimeout(timeoutId);
-
-      if (readyRes && readyRes.ok) {
-        try {
-          const data = await readyRes.json();
-          const isDbConnected = data.database?.status === 'connected';
-          setInfra({
-            backendOnline: true,
-            postgresActive: isDbConnected,
-            dbLatencyMs: data.database?.latency_ms ?? 1.2,
-            serverVersion: data.database?.server_version ?? 'PostgreSQL 16.2',
-            lastProbeTime: probeTimestamp,
-            probeError: null,
-          });
-        } catch {
-          setInfra({
-            backendOnline: true,
-            postgresActive: true,
-            dbLatencyMs: null,
-            serverVersion: 'PostgreSQL 16.2 (Active)',
-            lastProbeTime: probeTimestamp,
-            probeError: null,
-          });
-        }
-      } else {
-        setInfra({
-          backendOnline: false,
-          postgresActive: false,
-          dbLatencyMs: null,
-          serverVersion: null,
-          lastProbeTime: probeTimestamp,
-          probeError: readyRes ? `HTTP ${readyRes.status}` : 'Connection Refused',
-        });
-      }
-    } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Backend Unreachable';
-      setInfra({
-        backendOnline: false,
-        postgresActive: false,
-        dbLatencyMs: null,
-        serverVersion: null,
-        lastProbeTime: probeTimestamp,
-        probeError: errorMsg,
-      });
-    } finally {
-      setIsProbing(false);
+      await fetch('http://127.0.0.1:8000/api/live-events/reset', { method: 'POST' });
+    } catch (err) {
+      console.warn('[UATU Alert Bridge] Error resetting alert queue:', err);
     }
-  }, []);
+  };
 
-  useEffect(() => {
-    const initialTimer = setTimeout(() => {
-      probeInfrastructure();
-    }, 10);
-    const probeInterval = setInterval(() => {
-      probeInfrastructure();
-    }, 15000);
-    return () => {
-      clearTimeout(initialTimer);
-      clearInterval(probeInterval);
-    };
-  }, [probeInfrastructure]);
-
-  /* -----------------------------------------------------------------------
-     4b. Real-Time Camera Telemetry Sync (/api/camera-telemetry)
-     ----------------------------------------------------------------------- */
-  useEffect(() => {
-    let isDisposed = false;
-    const fetchTelemetry = async () => {
-      try {
-        const res = await fetch('http://127.0.0.1:8000/api/camera-telemetry');
-        if (res.ok) {
-          const data = await res.json();
-          if (!isDisposed && data) {
-            setCameras((prev) =>
-              prev.map((c) => {
-                const info = data[c.id];
-                if (info) {
-                  return {
-                    ...c,
-                    fps: info.is_online ? info.fps : 0,
-                    isOnline: c.sourceType === 'STANDBY' ? false : (info.is_online ?? c.isOnline),
-                    entry: info.entry ?? c.entry ?? 0,
-                    exit: info.exit ?? c.exit ?? 0,
-                    occupancy: info.occupancy ?? c.occupancy ?? 0,
-                  };
-                }
-                return c;
-              })
-            );
-          }
-        }
-      } catch {
-        // Silently tolerate during dev server reloads
-      }
-    };
-
-    const interval = setInterval(fetchTelemetry, 2500);
-    fetchTelemetry();
-    return () => {
-      isDisposed = true;
-      clearInterval(interval);
-    };
-  }, []);
-
-  /* -----------------------------------------------------------------------
-     5. Source Assignment & Video Upload Logic
-     ----------------------------------------------------------------------- */
-  const handleAssignSource = (
-    camId: string,
-    sourceType: StreamSourceType,
-    url: string = '',
-    customFileName?: string,
-    deviceId?: number
-  ) => {
-    // Reset error state for the reassigned camera
-    setStreamErrors((prev) => ({ ...prev, [camId]: false }));
-    setReconnectTicks((prev) => ({ ...prev, [camId]: Date.now() }));
-
-    if (sourceType === 'STANDBY') {
-      fetch(`http://127.0.0.1:8000/api/camera/${encodeURIComponent(camId)}/stop`, {
-        method: 'POST',
-      }).catch(() => {});
-    }
-
-    setCameras((prev) =>
-      prev.map((c) => {
-        if (c.id === camId) {
-          const isNowOnline = sourceType !== 'STANDBY';
+  // Toggle Alert Acknowledge
+  const toggleAcknowledge = async (id: string) => {
+    const ackTime = formatUtcTime();
+    setAlerts((prev) =>
+      prev.map((alert) => {
+        if (alert.id === id) {
+          const nextState = !alert.acknowledged;
           return {
-            ...c,
-            sourceType,
-            streamUrl: url,
-            customFileName: customFileName ?? c.customFileName,
-            deviceId: sourceType === 'WEBCAM' ? (deviceId ?? 1) : undefined,
-            isOnline: isNowOnline,
-            fps: isNowOnline ? (sourceType === 'WEBCAM' ? 30 : 25) : 0,
+            ...alert,
+            acknowledged: nextState,
+            acknowledgedAt: nextState ? ackTime : undefined,
           };
         }
-        return c;
+        return alert;
       })
     );
-  };
-
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file || !selectedCamForConfig) return;
-
-    setUploadLoading(true);
-    setUploadMessage(null);
-
-    const formData = new FormData();
-    formData.append('file', file);
 
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/upload-video', {
+      await fetch(`http://127.0.0.1:8000/api/live-events/${encodeURIComponent(id)}/acknowledge`, {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acknowledged_by: 'Dashboard_Supervisor' }),
       });
-
-      if (!response.ok) {
-        throw new Error(`Upload failed with HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
-      const streamUrl = `http://127.0.0.1:8000${data.stream_url}?camera=${encodeURIComponent(
-        selectedCamForConfig.id
-      )}&zone=${encodeURIComponent(selectedCamForConfig.zone)}`;
-
-      handleAssignSource(
-        selectedCamForConfig.id,
-        'CUSTOM_UPLOAD',
-        streamUrl,
-        file.name
-      );
-
-      setUploadMessage(`Success: Assigned custom stream for ${file.name}`);
-      setTimeout(() => {
-        setSelectedCamForConfig(null);
-        setUploadMessage(null);
-      }, 1200);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Upload Error';
-      setUploadMessage(`Error: ${msg}`);
-    } finally {
-      setUploadLoading(false);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
-    }
+    } catch {}
   };
 
-  /* -----------------------------------------------------------------------
-     5b. Live Biometric Personnel Enrollment Submission (POST /api/enroll)
-     ----------------------------------------------------------------------- */
+  const unacknowledgedCount = useMemo(() => {
+    return alerts.filter((a) => !a.acknowledged).length;
+  }, [alerts]);
+
+  // Visible Cameras Filtered
+  const visibleCameras = useMemo(() => {
+    let list = cameras;
+    if (cameraFilter !== 'ALL') {
+      list = cameras.filter((c) => c.id === cameraFilter);
+    }
+    if (searchFilter.trim()) {
+      const q = searchFilter.toLowerCase();
+      list = list.filter((c) => c.name.toLowerCase().includes(q) || c.id.toLowerCase().includes(q) || c.zone.toLowerCase().includes(q));
+    }
+    if (gridLayout === '1x1') {
+      const focused = list.find((c) => c.id === (focusedCameraId || 'CAM-01'));
+      return focused ? [focused] : [list[0] || cameras[0]];
+    }
+    if (gridLayout === '2x2') {
+      return list.slice(0, 4);
+    }
+    return list; // 3x3 returns all
+  }, [gridLayout, focusedCameraId, cameras, cameraFilter, searchFilter]);
+
+  const totalOccupancy = useMemo(() => {
+    return cameras.reduce((acc, c) => acc + (c.occupancy ?? 0), 0);
+  }, [cameras]);
+
+  const totalPersons = useMemo(() => {
+    return cameras.reduce((acc, c) => acc + (c.personCount ?? c.occupancy ?? 0), 0);
+  }, [cameras]);
+
+  const totalEntries = useMemo(() => {
+    return cameras.reduce((acc, c) => acc + (c.entry ?? 0), 0);
+  }, [cameras]);
+
+  const totalExits = useMemo(() => {
+    return cameras.reduce((acc, c) => acc + (c.exit ?? 0), 0);
+  }, [cameras]);
+
+  // Biometric Personnel Enrollment Submission
   const handleEnrollSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!enrollName.trim() || !enrollRoll.trim() || !enrollId.trim()) {
@@ -767,7 +811,6 @@ export const App: React.FC = () => {
       setEnrollName('');
       setEnrollRoll('');
       setEnrollId('');
-
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Biometric capture failed';
       setEnrollFeedback({
@@ -779,9 +822,7 @@ export const App: React.FC = () => {
     }
   };
 
-  /* -----------------------------------------------------------------------
-     6. Live AI Verification Trigger (YOLOv8 + InsightFace ArcFace)
-     ----------------------------------------------------------------------- */
+  // Live Verification Trigger (YOLOv8 + InsightFace ArcFace)
   const handleLiveVerification = async () => {
     const targetId = verifyEmployeeId.trim();
     if (!targetId) {
@@ -835,9 +876,10 @@ export const App: React.FC = () => {
           id: `EVT-${Math.floor(8000 + Math.random() * 2000)}`,
           timestamp: timeStr,
           zone: data.zone || `Zone 01 // Device ${verifyDeviceId}`,
-          type: 'FACE MISMATCH DETECTED',
+          camera: `CAM-0${verifyDeviceId + 1}`,
+          type: 'Face Mismatch Detected',
           severity: 'WARNING',
-          detail: `Optical ArcFace match scored ${data.match_score}% for scanned badge ${data.employee_id} (${data.employee_name}) (Threshold: 50.0%).`,
+          detail: `Optical ArcFace match scored ${data.match_score}% for scanned badge ${data.employee_id} (${data.employee_name}).`,
           acknowledged: false,
           eventRef: accessId,
         };
@@ -851,25 +893,26 @@ export const App: React.FC = () => {
           id: `EVT-${Math.floor(8000 + Math.random() * 2000)}`,
           timestamp: timeStr,
           zone: data.zone || `Zone 01 // Device ${verifyDeviceId}`,
-          type: 'TAILGATING VIOLATION',
+          camera: `CAM-0${verifyDeviceId + 1}`,
+          type: 'Tailgating Detected',
           severity: 'CRITICAL',
-          detail: `Tailgating breach detected: ${data.person_count} physical persons detected in frame during credential scan for ${data.employee_id} (${data.employee_name}).`,
+          detail: `Multiple individuals detected passing optical turnstile with single RFID badge scan.`,
           acknowledged: false,
           eventRef: accessId,
         };
         setAlerts((prev) => [newAlert, ...prev]);
         setVerifyFeedback({
           type: 'error',
-          message: `TAILGATING DETECTED: ${data.person_count} persons in camera frame!`,
+          message: `TAILGATING: Multiple persons detected at optical lane.`,
         });
       } else {
         setVerifyFeedback({
           type: 'success',
-          message: `AUTHORIZED: ${data.employee_name} verified (${data.match_score}% ArcFace match).`,
+          message: `AUTHORIZED: Personnel verified (${data.employee_name}, Score: ${data.match_score}%).`,
         });
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Verification request failed';
+      const msg = err instanceof Error ? err.message : 'Verification failed';
       setVerifyFeedback({
         type: 'error',
         message: msg,
@@ -879,1020 +922,772 @@ export const App: React.FC = () => {
     }
   };
 
-  /* -----------------------------------------------------------------------
-     7. Alert Acknowledgment Toggle & Manual Queue Reset
-     ----------------------------------------------------------------------- */
-  const handleResetAlerts = useCallback(() => {
-    try {
-      localStorage.setItem('uatu_incident_queue', JSON.stringify([]));
-      localStorage.setItem('uatu_alerts_reset_at', new Date().toISOString());
-    } catch (err) {
-      console.warn('[UATU Alert Bridge] Error persisting reset state to localStorage:', err);
-    }
-    setAlerts([]);
-    // Clear backend LiveEventStore
-    fetch('http://127.0.0.1:8000/api/live-events/clear', { method: 'POST' }).catch((err) => {
-      console.debug('[UATU Alert Bridge] Backend clear events notice:', err);
-    });
-  }, []);
-
-  const toggleAcknowledge = async (id: string) => {
-    const ackTime = formatUtcTime();
-    setAlerts((prev) =>
-      prev.map((alert) => {
-        if (alert.id === id) {
-          const nextState = !alert.acknowledged;
-          return {
-            ...alert,
-            acknowledged: nextState,
-            acknowledgedAt: nextState ? ackTime : undefined,
-          };
-        }
-        return alert;
-      })
-    );
-
-    // Synchronize alert acknowledgement with backend LiveEventStore
-    try {
-      await fetch(`http://127.0.0.1:8000/api/live-events/${encodeURIComponent(id)}/acknowledge`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ acknowledged_by: 'Dashboard_Supervisor' }),
-      });
-    } catch (err) {
-      console.debug('[UATU Alert Bridge] Backend acknowledge notice:', err);
+  // Snapshot Downloader
+  const handleSnapshot = (cam: CameraChannel) => {
+    if (cam.streamUrl) {
+      window.open(cam.streamUrl, '_blank');
     }
   };
 
-  const unacknowledgedCount = useMemo(() => {
-    return alerts.filter((a) => !a.acknowledged).length;
-  }, [alerts]);
-
-  const visibleCameras = useMemo(() => {
-    if (gridLayout === '1x1') {
-      const focused = cameras.find((c) => c.id === (focusedCameraId || 'CAM-01'));
-      return focused ? [focused] : [cameras[0]];
-    }
-    if (gridLayout === '2x2') {
-      return cameras.slice(0, 4);
-    }
-    return cameras; // 3x3 returns all 9
-  }, [gridLayout, focusedCameraId, cameras]);
-
-  const totalOccupancy = useMemo(() => {
-    return cameras.reduce((acc, c) => acc + (c.occupancy ?? 0), 0);
-  }, [cameras]);
-
-  const totalEntries = useMemo(() => {
-    return cameras.reduce((acc, c) => acc + (c.entry ?? 0), 0);
-  }, [cameras]);
-
-  const totalExits = useMemo(() => {
-    return cameras.reduce((acc, c) => acc + (c.exit ?? 0), 0);
-  }, [cameras]);
-
-  /* =========================================================================
-     RENDER
-     ========================================================================= */
-
   return (
-    <div className="min-h-screen bg-[#020617] text-[#f8fafc] flex flex-col font-sans selection:bg-slate-800 selection:text-emerald-300">
+    <div className="min-h-screen bg-[#060b18] text-[#f8fafc] flex font-sans selection:bg-blue-600 selection:text-white">
       {/* =====================================================================
-          A. TOP HEADER & INFRASTRUCTURE DIAGNOSTICS (UNIFIED UATU BRANDING)
+          1. LEFT SIDEBAR NAVIGATION
           ===================================================================== */}
-      <header className="border-b border-[#1e293b] bg-[#0f172a] px-4 py-2.5 sm:px-6 sticky top-0 z-40 shadow-md">
-        <div className="max-w-[1920px] mx-auto flex flex-wrap items-center justify-between gap-4">
-          {/* System Title & Identity */}
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded bg-slate-950 border border-slate-800 text-emerald-400">
-              <ShieldCheck className="w-5 h-5" />
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-sm sm:text-base font-bold tracking-wider text-slate-100">
-                UNIFIED ASSISTANT FOR THREAT &amp; UNDERSTANDING (AI)
-              </span>
-              <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[11px] font-mono px-2 py-0.5 rounded font-semibold uppercase tracking-wider">
-                UATU // EDGE SYSTEM
-              </span>
-            </div>
-          </div>
-
-          {/* Infrastructure Health Bar & UTC Telemetry */}
-          <div className="flex flex-wrap items-center gap-2.5 sm:gap-3 text-xs font-mono">
-            {/* Live Real-Time Occupancy Header Badge */}
-            <div
-              className="flex items-center gap-2 px-3 py-1.5 rounded bg-slate-950 border border-emerald-500/30 text-emerald-400 font-mono text-xs shadow-sm"
-              title="Real-Time Facility Occupancy (Calculated dynamically from active line-crossing counters)"
-            >
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                <span className="text-slate-300 font-semibold">OCCUPANCY:</span>
-                <span className="font-bold text-emerald-400 text-sm">{totalOccupancy}</span>
-              </div>
-              <span className="text-slate-600">|</span>
-              <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
-                <span className="text-emerald-300 font-medium">IN: {totalEntries}</span>
-                <span className="text-slate-600">/</span>
-                <span className="text-amber-300 font-medium">OUT: {totalExits}</span>
-              </div>
-            </div>
-            {/* FastAPI Backend Probe */}
-            <div
-              className={`flex items-center gap-2 px-3 py-1.5 rounded border transition-colors ${
-                infra.backendOnline
-                  ? 'bg-slate-950 border-emerald-500/30 text-emerald-400'
-                  : 'bg-red-950/20 border-red-500/30 text-red-400'
-              }`}
-              title={infra.backendOnline ? 'FastAPI Uvicorn responding on port 8000' : 'Backend offline'}
-            >
-              <Server className="w-3.5 h-3.5" />
-              <div className="flex items-center gap-1.5">
-                <span
-                  className={`w-2 h-2 rounded-full ${
-                    infra.backendOnline ? 'bg-emerald-400 animate-pulse' : 'bg-red-500'
-                  }`}
-                />
-                <span className="font-semibold">
-                  {infra.backendOnline ? 'PORT 8000 ONLINE' : 'PORT 8000 OFFLINE'}
-                </span>
-              </div>
-            </div>
-
-            {/* PostgreSQL Status Indicator */}
-            <div
-              className={`flex items-center gap-2 px-3 py-1.5 rounded border transition-colors ${
-                infra.postgresActive
-                  ? 'bg-slate-950 border-emerald-500/30 text-emerald-400'
-                  : 'bg-slate-950 border-slate-800 text-slate-400'
-              }`}
-              title={
-                infra.postgresActive
-                  ? `PostgreSQL 16.2 Connected (${infra.dbLatencyMs ? infra.dbLatencyMs.toFixed(1) + 'ms' : 'Active'})`
-                  : 'PostgreSQL standby'
-              }
-            >
-              <Database className="w-3.5 h-3.5" />
-              <div className="flex items-center gap-1.5">
-                <span
-                  className={`w-2 h-2 rounded-full ${
-                    infra.postgresActive ? 'bg-emerald-400' : 'bg-slate-600'
-                  }`}
-                />
-                <span className="font-semibold">
-                  {infra.postgresActive ? '5432 ACTIVE' : '5432 STANDBY'}
-                </span>
-              </div>
-            </div>
-
-            {/* Manual Probe Button */}
-            <button
-              onClick={probeInfrastructure}
-              disabled={isProbing}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition-all disabled:opacity-50"
-              title="Manually verify backend and database status"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isProbing ? 'animate-spin text-emerald-400' : ''}`} />
-              <span className="hidden md:inline">Probe</span>
-            </button>
-
-            {/* System Settings & Administrative Operations Modal Button */}
-            <button
-              onClick={() => setShowSettingsModal(true)}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white transition-all group"
-              title="System Settings, Biometric Enrollment & Audit Log Export"
-              aria-label="Settings, Enrollment and Audit Export"
-            >
-              <Settings className="w-3.5 h-3.5 text-emerald-400 group-hover:rotate-45 transition-transform duration-200" />
-              <span className="hidden md:inline font-mono text-xs">Settings</span>
-            </button>
-
-            {/* IRIS AI Voice & Query Assistant Launcher */}
-            <UATUVoiceAssistantLauncher />
-
-            {/* Live UTC Telemetry Clock */}
-            <div className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded bg-slate-950 border border-slate-800 text-slate-400 font-mono text-[11px]">
-              <Clock className="w-3.5 h-3.5 text-slate-500" />
-              <span>{currentTime}</span>
-            </div>
-          </div>
-        </div>
-      </header>
+      <LeftSidebar
+        activeTab={navTab}
+        onSelectTab={(tab) => {
+          if (tab === 'settings') {
+            setShowSettingsModal(true);
+          } else if (tab === 'reports') {
+            setActiveView('AUDIT_LOGS');
+            setNavTab(tab);
+          } else {
+            setActiveView('MULTIVIEW');
+            setNavTab(tab);
+          }
+        }}
+        systemOnline={infra.backendOnline}
+        incidentCount={unacknowledgedCount}
+        onSystemStatusClick={probeInfrastructure}
+      />
 
       {/* =====================================================================
-          DEDICATED AUDIT LOGS DASHBOARD OR MULTIVIEW WORKSPACE
+          2. MAIN CENTER WORKSPACE
           ===================================================================== */}
-      {activeView === 'AUDIT_LOGS' && fortressSession ? (
-        <AuditLogsPage
-          sessionToken={fortressSession.token}
-          superadminUser={fortressSession.username}
-          trustScore={fortressSession.trustScore}
-          initialDate={auditTargetDate}
-          onBackToMultiview={() => setActiveView('MULTIVIEW')}
-          backendUrl="http://127.0.0.1:8000"
+      <div className="flex-1 flex flex-col min-w-0 h-screen overflow-y-auto">
+        {/* Top Header Bar */}
+        <TopHeader
+          unacknowledgedAlertsCount={unacknowledgedCount}
+          occupancyCount={totalOccupancy}
+          personCount={totalPersons}
+          inCount={totalEntries}
+          outCount={totalExits}
+          onNotificationClick={() => setNavTab('incidents')}
+          onSearch={(q) => setSearchFilter(q)}
         />
-      ) : (
-        <main className="flex-1 max-w-[1920px] w-full mx-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* ===================================================================
-            LEFT COLUMN (65% width: 8/12 columns on LG screens)
-            MULTIVIEW 9-CAMERA GRID & BIOMETRIC ACCESS CONTROL
-            =================================================================== */}
-        <div className="lg:col-span-8 flex flex-col gap-6">
-          {/* -----------------------------------------------------------------
-              SURVEILLANCE MATRIX VIEWPORT CONTAINER
-              ----------------------------------------------------------------- */}
-          <div className="bg-[#0f172a] rounded-lg border border-[#1e293b] shadow-xl overflow-hidden flex flex-col">
-            {/* Viewport Top Bar & Layout Selector */}
-            <div className="px-4 py-2.5 bg-slate-900/90 border-b border-[#1e293b] flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-emerald-500" />
-                <span className="text-sm font-semibold tracking-wide text-slate-200">
-                  Live Feeds
-                </span>
-                {focusedCameraId && gridLayout === '1x1' && (
-                  <span className="text-xs font-mono text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-800/40 ml-2">
-                    Focused: {focusedCameraId}
+
+        {/* Dedicated Fortress Audit Logs or Main Workspace */}
+        {activeView === 'AUDIT_LOGS' && fortressSession ? (
+          <AuditLogsPage
+            sessionToken={fortressSession.token}
+            superadminUser={fortressSession.username}
+            trustScore={fortressSession.trustScore}
+            initialDate={auditTargetDate}
+            onBackToMultiview={() => {
+              setActiveView('MULTIVIEW');
+              setNavTab('live');
+            }}
+            backendUrl="http://127.0.0.1:8000"
+          />
+        ) : (
+          <main className="p-6 flex-1 flex flex-col gap-6">
+            {/* View Controls Toolbar */}
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              {/* Camera Selector Dropdown & Zone Summary Pill */}
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="relative">
+                  <select
+                    value={cameraFilter}
+                    onChange={(e) => setCameraFilter(e.target.value)}
+                    className="appearance-none bg-[#0b132b] hover:bg-[#0e1838] border border-[#162347] rounded-xl pl-3.5 pr-8 py-2 text-xs font-semibold text-slate-200 focus:outline-none focus:border-blue-500 transition-colors cursor-pointer"
+                  >
+                    <option value="ALL">All Cameras</option>
+                    {cameras.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.id} — {c.name}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                </div>
+
+                {/* Zone Count Summary Badge */}
+                <div
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#0b132b] border border-[#162347] text-xs font-mono shadow-sm"
+                  title="Aggregated Active Zone People Count"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="text-slate-400">Total Detected:</span>
+                  <span className="text-emerald-400 font-bold">{totalPersons} Persons</span>
+                  <span className="text-slate-600">|</span>
+                  <span className="text-slate-400">Zones:</span>
+                  <span className="text-slate-200 font-semibold">
+                    {cameras.filter((c) => c.isOnline && c.sourceType !== 'STANDBY').length} Active
                   </span>
-                )}
+                </div>
               </div>
 
-              {/* View Switcher Controls */}
-              <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded border border-slate-800 text-xs font-mono">
-                <button
-                  onClick={() => {
-                    setGridLayout('1x1');
-                    if (!focusedCameraId) setFocusedCameraId('CAM-01');
-                  }}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded transition-colors ${
-                    gridLayout === '1x1'
-                      ? 'bg-emerald-600 text-white font-bold'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                  title="Single Camera Focus Mode"
-                >
-                  <Maximize2 className="w-3.5 h-3.5" />
-                  <span>1x1 Focus</span>
-                </button>
+              {/* View Switchers & Ask IRIS AI FlowButton */}
+              <div className="flex items-center gap-3">
+                {/* Grid / List / Map Toggle Buttons */}
+                <div className="flex items-center bg-[#0b132b] border border-[#162347] rounded-xl p-1 gap-1 text-xs">
+                  <Button
+                    onClick={() => {
+                      setViewMode('grid');
+                      setGridLayout((prev) => (prev === '2x2' ? '3x3' : '2x2'));
+                    }}
+                    variant={viewMode === 'grid' ? 'default' : 'ghost'}
+                    size="sm"
+                    className={`flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium transition-all ${
+                      viewMode === 'grid'
+                        ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-sm font-semibold'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                    }`}
+                    title={gridLayout === '2x2' ? 'Toggle 3x3 Matrix' : 'Toggle 2x2 Quad'}
+                  >
+                    {gridLayout === '3x3' ? <Grid className="w-3.5 h-3.5" /> : <LayoutGrid className="w-3.5 h-3.5" />}
+                    <span>{gridLayout === '3x3' ? '3x3 Matrix' : 'Grid'}</span>
+                  </Button>
 
-                <button
-                  onClick={() => {
-                    setGridLayout('2x2');
-                    setFocusedCameraId(null);
-                  }}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded transition-colors ${
-                    gridLayout === '2x2'
-                      ? 'bg-emerald-600 text-white font-bold'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                  title="Quad View (CAM-01 to CAM-04)"
-                >
-                  <LayoutGrid className="w-3.5 h-3.5" />
-                  <span>2x2 Quad</span>
-                </button>
+                  <Button
+                    onClick={() => setViewMode('list')}
+                    variant={viewMode === 'list' ? 'default' : 'ghost'}
+                    size="sm"
+                    className={`flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium transition-all ${
+                      viewMode === 'list'
+                        ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-sm font-semibold'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                    }`}
+                    title="Compact Camera Table View"
+                  >
+                    <List className="w-3.5 h-3.5" />
+                    <span>List</span>
+                  </Button>
 
-                <button
-                  onClick={() => {
-                    setGridLayout('3x3');
-                    setFocusedCameraId(null);
-                  }}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded transition-colors ${
-                    gridLayout === '3x3'
-                      ? 'bg-emerald-600 text-white font-bold'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                  title="Full 9-Camera Matrix View (CAM-01 to CAM-09)"
-                >
-                  <Grid className="w-3.5 h-3.5" />
-                  <span>3x3 Matrix</span>
-                </button>
+                  <Button
+                    onClick={() => setViewMode('map')}
+                    variant={viewMode === 'map' ? 'default' : 'ghost'}
+                    size="sm"
+                    className={`flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium transition-all ${
+                      viewMode === 'map'
+                        ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-sm font-semibold'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                    }`}
+                    title="Facility Blueprint & Zone Map"
+                  >
+                    <MapPin className="w-3.5 h-3.5" />
+                    <span>Map</span>
+                  </Button>
+                </div>
+
+                {/* Ask IRIS AI FlowButton */}
+                <UATUVoiceAssistantLauncher
+                  trigger={(open) => (
+                    <FlowButton
+                      text="Ask IRIS AI"
+                      onClick={open}
+                    />
+                  )}
+                />
               </div>
             </div>
 
-            {/* Grid Container */}
-            <div className="p-3 bg-[#020617]">
-              <div
-                className={`grid gap-3 transition-all duration-200 ${
-                  gridLayout === '1x1'
-                    ? 'grid-cols-1'
-                    : gridLayout === '2x2'
-                    ? 'grid-cols-1 sm:grid-cols-2'
-                    : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3'
-                }`}
-              >
-                {visibleCameras.map((cam) => {
-                  const isStandby = cam.sourceType === 'STANDBY';
-                  const hasStream = !isStandby && cam.streamUrl.length > 0;
-                  const isError = Boolean(streamErrors[cam.id]);
-
-                  // Append cache-busting timestamp param if re-attempting connection
-                  const tick = reconnectTicks[cam.id];
-                  const streamSrc = hasStream
-                    ? tick
-                      ? `${cam.streamUrl}${cam.streamUrl.includes('?') ? '&' : '?'}t=${tick}`
-                      : cam.streamUrl
-                    : '';
-
-                  return (
-                    <div
-                      key={cam.id}
-                      className={`relative rounded border transition-all flex flex-col overflow-hidden group ${
-                        focusedCameraId === cam.id && gridLayout === '1x1'
-                          ? 'border-emerald-500/70 shadow-2xl shadow-emerald-950/20'
-                          : 'border-slate-800/90 hover:border-slate-700 bg-slate-900/60'
-                      }`}
-                    >
-                      {/* Tile Top Control Bar */}
-                      <div className="px-2.5 py-1.5 bg-slate-950/90 border-b border-slate-800 flex items-center justify-between text-xs font-mono z-10">
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`w-2 h-2 rounded-full shrink-0 ${
-                              cam.isOnline && !isStandby && !isError
-                                ? 'bg-emerald-400 animate-pulse'
-                                : isError
-                                ? 'bg-red-500 animate-pulse'
-                                : 'bg-slate-600'
-                            }`}
-                            title={
-                              cam.isOnline && !isStandby && !isError
-                                ? 'Stream Live'
-                                : isError
-                                ? 'Connecting / Retrying...'
-                                : 'Unassigned / Idle'
-                            }
-                          />
-                          <span className="font-semibold text-slate-200 shrink-0">{cam.id}</span>
-                          <span className="text-slate-400 text-[11px] truncate max-w-[100px] sm:max-w-[140px]">
-                            {cam.name}
-                          </span>
-                          {cam.occupancy !== undefined && cam.isOnline && !isStandby && (
-                            <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-1.5 py-0.5 rounded text-[10px] font-mono shrink-0">
-                              OCC: {cam.occupancy} (IN: {cam.entry ?? 0} | OUT: {cam.exit ?? 0})
-                            </span>
-                          )}
-                        </div>
-
-                        {/* Action Icons */}
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <span className="text-slate-400 p-0.5" title={cam.sourceType === 'WEBCAM' ? `Webcam (Device ${cam.deviceId ?? 1})` : cam.sourceType}>
-                            <Video className="w-3.5 h-3.5 text-slate-400" />
-                          </span>
-
-                          {/* ⚙️ Source Selector Button */}
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openConfigModal(cam);
-                            }}
-                            className="p-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition-colors"
-                            title="Configure Camera Source (Webcam, Loop, Upload, Standby)"
-                          >
-                            <Settings className="w-3.5 h-3.5" />
-                          </button>
-
-                          {/* Focus / Maximize Button */}
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (gridLayout === '1x1') {
-                                setGridLayout('3x3');
-                                setFocusedCameraId(null);
-                              } else {
-                                setFocusedCameraId(cam.id);
-                                setGridLayout('1x1');
-                              }
-                            }}
-                            className="p-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition-colors"
-                            title={gridLayout === '1x1' ? 'Return to 3x3 Grid (Esc)' : 'Expand to Focus View'}
-                          >
-                            {gridLayout === '1x1' ? (
-                              <Minimize2 className="w-3.5 h-3.5 text-emerald-400" />
-                            ) : (
-                              <Maximize2 className="w-3.5 h-3.5" />
-                            )}
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Video Viewport Tile Body */}
-                      <div
-                        onClick={() => {
-                          if (gridLayout !== '1x1') {
-                            setFocusedCameraId(cam.id);
+            {/* TAB CONTENT: LIVE VIEW */}
+            {navTab === 'live' && (
+              <>
+                {viewMode === 'grid' && (
+                  <div
+                    className={`grid gap-5 transition-all duration-200 ${
+                      gridLayout === '1x1'
+                        ? 'grid-cols-1'
+                        : gridLayout === '2x2'
+                        ? 'grid-cols-1 lg:grid-cols-2'
+                        : 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'
+                    }`}
+                  >
+                    {visibleCameras.map((cam) => (
+                      <CameraCard
+                        key={cam.id}
+                        camera={cam}
+                        isFocused={focusedCameraId === cam.id && gridLayout === '1x1'}
+                        streamError={Boolean(streamErrors[cam.id])}
+                        currentTimeString={cardTime}
+                        currentDateString={cardDate}
+                        onConfigureClick={(c) => openConfigModal(c as CameraChannel)}
+                        onFocusToggle={(c) => {
+                          if (gridLayout === '1x1') {
+                            setGridLayout('2x2');
+                            setFocusedCameraId(null);
+                          } else {
+                            setFocusedCameraId(c.id);
                             setGridLayout('1x1');
                           }
                         }}
-                        className={`relative w-full aspect-video bg-[#020617] flex items-center justify-center cursor-pointer overflow-hidden ${
-                          gridLayout === '1x1' ? 'min-h-[460px]' : ''
-                        }`}
-                      >
-                        {hasStream ? (
-                          <>
-                            <img
-                              src={streamSrc}
-                              alt={`${cam.id} live video feed`}
-                              className={`w-full h-full object-contain select-none transition-opacity duration-200 ${
-                                isError ? 'opacity-30' : 'opacity-100'
-                              }`}
-                              onLoad={() => {
-                                setStreamErrors((prev) => ({ ...prev, [cam.id]: false }));
-                              }}
-                              onError={() => {
-                                setStreamErrors((prev) => ({ ...prev, [cam.id]: true }));
-                              }}
-                            />
-                            {/* Reconnect Recovery Indicator Overlay */}
-                            {isError && (
-                              <div className="absolute inset-0 flex flex-col items-center justify-center p-3 text-center bg-slate-950/80 pointer-events-none">
-                                <RefreshCw className="w-4 h-4 text-slate-500 animate-spin mb-1.5" />
-                                <div className="text-xs font-medium text-slate-500">
-                                  Connecting...
-                                </div>
-                              </div>
-                            )}
-                          </>
-                        ) : (
-                          /* Minimalist Empty State */
-                          <div
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openConfigModal(cam);
-                            }}
-                            className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-slate-950 hover:bg-slate-900/50 transition-colors cursor-pointer group/tile"
-                          >
-                            <Plus className="w-4 h-4 text-slate-600 group-hover/tile:text-slate-400 transition-colors mb-1.5" />
-                            <span className="text-xs text-slate-500 font-medium tracking-wide">
-                              Unassigned
+                        onSnapshotClick={(c) => handleSnapshot(c as CameraChannel)}
+                        onStreamErrorChange={(id, isErr) =>
+                          setStreamErrors((prev) => ({ ...prev, [id]: isErr }))
+                        }
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {/* 1x1 Focus Mode Escape Banner */}
+                {gridLayout === '1x1' && (
+                  <div className="bg-[#0b132b] rounded-xl border border-[#162347] px-4 py-2.5 flex items-center justify-between text-xs text-slate-400">
+                    <span>
+                      Press <kbd className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-200 font-mono">Esc</kbd> to return to standard grid
+                    </span>
+                    <Button
+                      onClick={() => {
+                        setGridLayout('2x2');
+                        setFocusedCameraId(null);
+                      }}
+                      variant="ghost"
+                      size="sm"
+                      className="text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 font-semibold text-xs h-7 px-2.5"
+                    >
+                      Return to 2x2 View
+                    </Button>
+                  </div>
+                )}
+
+                {/* List View Mode */}
+                {viewMode === 'list' && (
+                  <div className="bg-[#0b132b] rounded-2xl border border-[#162347] overflow-hidden shadow-xl">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-[#0e1838] border-b border-[#162347] text-slate-400 font-mono">
+                          <th className="py-3 px-4">CAMERA</th>
+                          <th className="py-3 px-4">NAME &amp; LOCATION</th>
+                          <th className="py-3 px-4">STREAM SOURCE</th>
+                          <th className="py-3 px-4">FPS &amp; RESOLUTION</th>
+                          <th className="py-3 px-4">OCCUPANCY</th>
+                          <th className="py-3 px-4">STATUS</th>
+                          <th className="py-3 px-4 text-right">ACTION</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#162347]/60">
+                        {cameras.map((cam) => (
+                          <tr key={cam.id} className="hover:bg-[#0e1838]/50 transition-colors">
+                            <td className="py-3 px-4 font-bold text-white font-mono">{cam.id}</td>
+                            <td className="py-3 px-4">
+                              <div className="font-semibold text-slate-200">{cam.name}</div>
+                              <div className="text-[11px] text-slate-400">{cam.zone}</div>
+                            </td>
+                            <td className="py-3 px-4 font-mono text-slate-300">
+                              {cam.sourceType === 'WEBCAM' ? `Webcam (Dev ${cam.deviceId ?? 0})` : cam.sourceType}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-slate-300">
+                              {cam.fps || 30} FPS • {cam.resolution}
+                            </td>
+                            <td className="py-3 px-4 font-mono">
+                              <span className="text-emerald-400 font-semibold">{cam.personCount ?? cam.occupancy ?? 0}</span> (OCC: {cam.occupancy ?? 0} | IN: {cam.entry ?? 0} / OUT: {cam.exit ?? 0})
+                            </td>
+                            <td className="py-3 px-4">
+                              <span
+                                className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                                  cam.isOnline && cam.sourceType !== 'STANDBY'
+                                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                                    : 'bg-slate-800 text-slate-400'
+                                }`}
+                              >
+                                <span className={`w-1.5 h-1.5 rounded-full ${cam.isOnline ? 'bg-emerald-400' : 'bg-slate-600'}`} />
+                                {cam.isOnline && cam.sourceType !== 'STANDBY' ? 'Online' : 'Standby'}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <Button
+                                onClick={() => openConfigModal(cam)}
+                                variant="secondary"
+                                size="sm"
+                                className="h-7 px-2.5 rounded-lg bg-[#0e1838] hover:bg-blue-600 text-slate-300 hover:text-white border border-[#162347] text-xs"
+                              >
+                                Configure
+                              </Button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Map View Mode */}
+                {viewMode === 'map' && (
+                  <div className="bg-[#0b132b] rounded-2xl border border-[#162347] p-6 shadow-xl flex flex-col gap-4">
+                    <div className="flex items-center justify-between pb-3 border-b border-[#162347]">
+                      <div className="flex items-center gap-2">
+                        <MapPin className="w-5 h-5 text-blue-400" />
+                        <h2 className="text-base font-bold text-white">Facility Zone Sensor Map</h2>
+                      </div>
+                      <span className="text-xs text-slate-400 font-mono">9 Surveillance Zones Linked</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      {cameras.map((cam) => (
+                        <div
+                          key={cam.id}
+                          onClick={() => {
+                            setFocusedCameraId(cam.id);
+                            setGridLayout('1x1');
+                            setViewMode('grid');
+                          }}
+                          className="bg-[#0e1838] border border-[#162347] hover:border-blue-500 p-4 rounded-xl cursor-pointer transition-all hover:scale-[1.01]"
+                        >
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="font-bold text-white text-sm">{cam.id}</span>
+                            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">
+                              Zone Active
                             </span>
                           </div>
+                          <div className="font-semibold text-slate-200 text-xs">{cam.name}</div>
+                          <div className="text-[11px] text-slate-400 mt-1">{cam.zone}</div>
+                          <div className="mt-3 pt-2 border-t border-[#162347] flex items-center justify-between text-xs font-mono text-slate-400">
+                            <span>Detected / Occupancy:</span>
+                            <span className="text-emerald-400 font-bold">{cam.personCount ?? cam.occupancy ?? 0} Persons</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* TAB CONTENT: PEOPLE & ACCESS (Biometrics, ArcFace, RFID) */}
+            {(navTab === 'access' || navTab === 'live') && (
+              <div className="bg-[#0b132b] rounded-2xl border border-[#162347] p-5 shadow-xl flex flex-col gap-4">
+                <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[#162347]">
+                  <div className="flex items-center gap-2.5">
+                    <CreditCard className="w-5 h-5 text-blue-400" />
+                    <div>
+                      <h2 className="text-base font-bold text-white tracking-wide">
+                        Access Control &amp; Biometric Correlation
+                      </h2>
+                      <p className="text-xs text-slate-400">
+                        Real-time RFID transaction matched against ArcFace facial embeddings (InsightFace)
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Telemetry Row */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {/* Credential Profile */}
+                  <div className="bg-[#0e1838] rounded-xl border border-[#162347] p-4 flex flex-col justify-between">
+                    <div>
+                      <div className="flex items-center justify-between text-xs font-mono text-slate-400 mb-2">
+                        <span>CREDENTIAL ID</span>
+                        <span className="text-blue-400 font-semibold">RFID SCAN</span>
+                      </div>
+                      <div className="text-sm font-bold text-white">
+                        {currentAccess.badgeId}: {currentAccess.employeeName}
+                      </div>
+                      <div className="text-xs text-slate-400 mt-1">{currentAccess.department}</div>
+                    </div>
+                    <div className="mt-3 pt-2 border-t border-[#162347] text-[11px] text-slate-400 flex items-center justify-between">
+                      <span>Reader:</span>
+                      <span className="font-mono text-slate-200">{currentAccess.readerId}</span>
+                    </div>
+                  </div>
+
+                  {/* ArcFace Match Score */}
+                  <div className="bg-[#0e1838] rounded-xl border border-[#162347] p-4 flex flex-col justify-between">
+                    <div>
+                      <div className="flex items-center justify-between text-xs font-mono text-slate-400 mb-2">
+                        <span>ARCFACE MATCH SCORE</span>
+                        <span className="font-mono text-slate-300">512-D COSINE</span>
+                      </div>
+                      <div className="flex items-baseline gap-2">
+                        <span
+                          className={`text-2xl font-mono font-extrabold ${
+                            currentAccess.faceMatchScore >= 0.85
+                              ? 'text-emerald-400'
+                              : currentAccess.faceMatchScore >= 0.5
+                              ? 'text-amber-400'
+                              : 'text-red-400'
+                          }`}
+                        >
+                          {(currentAccess.faceMatchScore * 100).toFixed(1)}%
+                        </span>
+                        <span className="text-xs text-slate-500 font-mono">
+                          (Req: &ge; 50.0%)
+                        </span>
+                      </div>
+                      <div className="w-full bg-[#162347] h-2 rounded-full overflow-hidden mt-3">
+                        <div
+                          className={`h-full transition-all duration-500 ${
+                            currentAccess.faceMatchScore >= 0.85
+                              ? 'bg-emerald-500'
+                              : currentAccess.faceMatchScore >= 0.5
+                              ? 'bg-amber-500'
+                              : 'bg-red-500'
+                          }`}
+                          style={{ width: `${Math.min(100, currentAccess.faceMatchScore * 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                    <div className="mt-3 pt-2 border-t border-[#162347] text-[11px] text-slate-400 flex items-center justify-between">
+                      <span>Threshold:</span>
+                      <span className="text-emerald-400 font-medium">50.0% Minimum</span>
+                    </div>
+                  </div>
+
+                  {/* Security Verdict */}
+                  <div className="bg-[#0e1838] rounded-xl border border-[#162347] p-4 flex flex-col justify-between">
+                    <div>
+                      <div className="flex items-center justify-between text-xs font-mono text-slate-400 mb-2">
+                        <span>SECURITY VERDICT</span>
+                        <span className="font-mono text-slate-400">TURNSTILE GATE</span>
+                      </div>
+                      <div className="mt-1">
+                        {currentAccess.verdict === 'AUTHORIZED' && (
+                          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold font-mono">
+                            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                            AUTHORIZED
+                          </div>
                         )}
-
-                        {/* In-Tile HUD Telemetry Overlays */}
-                        {hasStream && !isError && (
-                          <div className="absolute inset-0 pointer-events-none p-2 flex flex-col justify-between">
-                            <div className="flex items-center justify-between text-[10px] font-mono">
-                              <span className="bg-slate-950/80 backdrop-blur px-1.5 py-0.5 rounded text-emerald-400 border border-slate-800 flex items-center gap-1">
-                                <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-                                LIVE // UATU
-                              </span>
-                              <span className="bg-slate-950/80 backdrop-blur px-1.5 py-0.5 rounded text-slate-300 border border-slate-800">
-                                {cam.resolution}
-                              </span>
-                            </div>
-
-                            <div className="flex items-center justify-between text-[10px] font-mono">
-                              <span className="bg-slate-950/80 backdrop-blur px-1.5 py-0.5 rounded text-slate-400 border border-slate-800 truncate max-w-[70%]">
-                                {cam.zone}
-                              </span>
-                              <span className="bg-slate-950/80 backdrop-blur px-1.5 py-0.5 rounded text-emerald-400 border border-slate-800">
-                                {(!cam.isOnline || isError || !hasStream || cam.sourceType === 'STANDBY') ? 0 : (cam.fps || 25)} FPS
-                              </span>
-                            </div>
+                        {currentAccess.verdict === 'MISMATCH' && (
+                          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-bold font-mono">
+                            <AlertTriangle className="w-4 h-4 text-amber-400" />
+                            MISMATCH
+                          </div>
+                        )}
+                        {currentAccess.verdict === 'TAILGATING' && (
+                          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-bold font-mono">
+                            <XCircle className="w-4 h-4 text-red-400" />
+                            TAILGATING
                           </div>
                         )}
                       </div>
                     </div>
-                  );
-                })}
-              </div>
-
-              {/* Focus Mode Escape Helper Bar */}
-              {gridLayout === '1x1' && (
-                <div className="mt-3 px-3 py-2 bg-slate-900/90 rounded border border-slate-800 flex items-center justify-between text-xs font-mono text-slate-400">
-                  <span>Press <kbd className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-700 text-slate-200">Esc</kbd> to return to 3x3 matrix</span>
-                  <button
-                    onClick={() => {
-                      setGridLayout('3x3');
-                      setFocusedCameraId(null);
-                    }}
-                    className="text-emerald-400 hover:text-emerald-300 underline font-semibold"
-                  >
-                    Return to 3x3 Grid
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* -----------------------------------------------------------------
-              C. ACCESS CONTROL & BIOMETRIC CORRELATION PANEL (ROW 2)
-              ----------------------------------------------------------------- */}
-          <div className="bg-[#0f172a] rounded-lg border border-[#1e293b] p-5 shadow-xl flex flex-col gap-5">
-            {/* Panel Title & Status */}
-            <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2.5">
-                <CreditCard className="w-5 h-5 text-emerald-400" />
-                <div>
-                  <h2 className="font-mono text-sm sm:text-base font-bold text-slate-100 tracking-wide uppercase">
-                    Access Control &amp; Biometric Correlation
-                  </h2>
-                  <p className="text-xs text-slate-400 font-sans">
-                    Real-time RFID transaction matched against ArcFace facial embeddings
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] font-mono text-slate-400">READER:</span>
-                <span className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[11px] font-mono text-slate-300">
-                  {currentAccess.readerId}
-                </span>
-              </div>
-            </div>
-
-            {/* Core Verification Telemetry Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {/* 1. Scanned RFID / Employee Profile */}
-              <div className="bg-[#020617] rounded-lg border border-slate-800 p-4 flex flex-col justify-between">
-                <div>
-                  <div className="flex items-center justify-between text-xs font-mono text-slate-400 mb-2">
-                    <span>CREDENTIAL ID</span>
-                    <span className="text-emerald-400">RFID SCAN</span>
-                  </div>
-                  <div className="text-base font-semibold text-slate-100">
-                    {currentAccess.badgeId}: {currentAccess.employeeName}
-                  </div>
-                  <div className="text-xs text-slate-400 mt-1">
-                    {currentAccess.department}
+                    <div className="mt-3 pt-2 border-t border-[#162347] text-[11px] text-slate-400 flex items-center justify-between">
+                      <span>Occupancy Detected:</span>
+                      <span className="font-bold text-slate-200">{currentAccess.occupancyDetected} Person(s)</span>
+                    </div>
                   </div>
                 </div>
-                <div className="mt-4 pt-2 border-t border-slate-900 text-[11px] font-mono text-slate-500 flex items-center justify-between">
-                  <span>LOCATION:</span>
-                  <span className="text-slate-300">{currentAccess.zone}</span>
-                </div>
-              </div>
 
-              {/* 2. Facial Match Score (ArcFace 512-d) */}
-              <div className="bg-[#020617] rounded-lg border border-slate-800 p-4 flex flex-col justify-between">
-                <div>
-                  <div className="flex items-center justify-between text-xs font-mono text-slate-400 mb-2">
-                    <span>ARCFACE MATCH SCORE</span>
-                    <span className="font-mono text-slate-300">512-D COSINE</span>
-                  </div>
-                  <div className="flex items-baseline gap-2">
-                    <span
-                      className={`text-2xl font-mono font-bold ${
-                        currentAccess.faceMatchScore >= 0.85
-                          ? 'text-emerald-400'
-                          : currentAccess.faceMatchScore >= 0.5
-                          ? 'text-amber-400'
-                          : 'text-red-400'
+                {/* Live Trigger Controls */}
+                <div className="bg-[#0e1838] rounded-xl border border-[#162347] p-4">
+                  {verifyFeedback && (
+                    <div
+                      className={`mb-3 p-2.5 rounded-lg border text-xs font-mono flex items-center gap-2 ${
+                        verifyFeedback.type === 'success'
+                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                          : verifyFeedback.type === 'warning'
+                          ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                          : 'bg-red-500/10 border-red-500/30 text-red-300'
                       }`}
                     >
-                      {(currentAccess.faceMatchScore * 100).toFixed(1)}%
-                    </span>
-                    <span className="text-xs text-slate-500 font-mono">
-                      (Score: {currentAccess.faceMatchScore.toFixed(3)})
-                    </span>
-                  </div>
+                      {verifyFeedback.type === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />}
+                      {verifyFeedback.type === 'warning' && <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />}
+                      {verifyFeedback.type === 'error' && <XCircle className="w-4 h-4 text-red-400 shrink-0" />}
+                      <span>{verifyFeedback.message}</span>
+                    </div>
+                  )}
 
-                  {/* Visual Confidence Bar */}
-                  <div className="w-full bg-slate-900 h-2 rounded-full overflow-hidden mt-3 border border-slate-800">
-                    <div
-                      className={`h-full transition-all duration-500 ${
-                        currentAccess.faceMatchScore >= 0.85
-                          ? 'bg-emerald-500'
-                          : currentAccess.faceMatchScore >= 0.5
-                          ? 'bg-amber-500'
-                          : 'bg-red-500'
-                      }`}
-                      style={{ width: `${Math.min(100, currentAccess.faceMatchScore * 100)}%` }}
-                    />
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+                    <div className="sm:col-span-5">
+                      <label className="block text-[11px] text-slate-400 font-medium mb-1">
+                        Employee ID to Scan ({enrolledUsers.length} Enrolled)
+                      </label>
+                      <input
+                        type="text"
+                        list="enrolled-employees-list"
+                        value={verifyEmployeeId}
+                        onChange={(e) => setVerifyEmployeeId(e.target.value)}
+                        placeholder="e.g. EMP-1001 or AUTO"
+                        disabled={isVerifying}
+                        className="w-full bg-[#0b132b] border border-[#162347] focus:border-blue-500 rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:outline-none"
+                      />
+                      <datalist id="enrolled-employees-list">
+                        <option value="AUTO">AUTO (1:N Biometric Retrieval)</option>
+                        {enrolledUsers.map((u) => (
+                          <option key={u.employee_id} value={u.employee_id}>
+                            {u.name} ({u.employee_id}) - {u.roll}
+                          </option>
+                        ))}
+                      </datalist>
+                    </div>
+
+                    <div className="sm:col-span-4">
+                      <label className="block text-[11px] text-slate-400 font-medium mb-1">
+                        Target Camera Feed
+                      </label>
+                      <select
+                        value={verifyDeviceId}
+                        onChange={(e) => setVerifyDeviceId(Number(e.target.value))}
+                        disabled={isVerifying}
+                        className="w-full bg-[#0b132b] border border-[#162347] focus:border-blue-500 rounded-xl px-3 py-2 text-xs text-white focus:outline-none"
+                      >
+                        <option value={0}>Device 0 — Mobile (Iriun)</option>
+                        <option value={1}>Device 1 — Laptop Webcam</option>
+                      </select>
+                    </div>
+
+                    <div className="sm:col-span-3">
+                      <Button
+                        onClick={handleLiveVerification}
+                        disabled={isVerifying}
+                        className="w-full flex items-center justify-center gap-2 h-9 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md shadow-blue-900/30 disabled:opacity-50"
+                      >
+                        {isVerifying ? (
+                          <>
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            <span>Verifying...</span>
+                          </>
+                        ) : (
+                          <>
+                            <ShieldCheck className="w-3.5 h-3.5" />
+                            <span>Scan &amp; Verify</span>
+                          </>
+                        )}
+                      </Button>
+                    </div>
                   </div>
-                </div>
-                <div className="mt-4 pt-2 border-t border-slate-900 text-[11px] font-mono text-slate-500 flex items-center justify-between">
-                  <span>THRESHOLD:</span>
-                  <span className="text-slate-300">&ge; 50.0% Required</span>
                 </div>
               </div>
+            )}
 
-              {/* 3. Access Verdict Pill & Occupancy */}
-              <div className="bg-[#020617] rounded-lg border border-slate-800 p-4 flex flex-col justify-between">
-                <div>
-                  <div className="flex items-center justify-between text-xs font-mono text-slate-400 mb-2">
-                    <span>SECURITY VERDICT</span>
-                    <span className="font-mono text-slate-400">TURNSTILE GATE</span>
-                  </div>
-
-                  {/* Verdict Badge */}
-                  <div className="mt-1">
-                    {currentAccess.verdict === 'AUTHORIZED' && (
-                      <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-950/40 border border-emerald-500/40 text-emerald-400 text-xs font-mono font-bold tracking-wider">
-                        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                        AUTHORIZED
-                      </div>
-                    )}
-                    {currentAccess.verdict === 'MISMATCH' && (
-                      <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-950/40 border border-amber-500/40 text-amber-400 text-xs font-mono font-bold tracking-wider">
-                        <AlertTriangle className="w-4 h-4 text-amber-400" />
-                        MISMATCH
-                      </div>
-                    )}
-                    {currentAccess.verdict === 'TAILGATING' && (
-                      <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-950/40 border border-red-500/40 text-red-400 text-xs font-mono font-bold tracking-wider">
-                        <XCircle className="w-4 h-4 text-red-400" />
-                        TAILGATING
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="mt-4 pt-2 border-t border-slate-900 text-[11px] font-mono text-slate-500 flex items-center justify-between">
-                  <span>OCCUPANCY DETECTED:</span>
-                  <span
-                    className={`font-semibold ${
-                      currentAccess.occupancyDetected > 1 ? 'text-red-400' : 'text-slate-300'
-                    }`}
-                  >
-                    {currentAccess.occupancyDetected} Person(s)
-                  </span>
-                </div>
+            {/* TAB CONTENT: INCIDENTS */}
+            {navTab === 'incidents' && (
+              <div className="flex-1 bg-[#0b132b] rounded-2xl border border-[#162347] p-5 shadow-xl">
+                <IncidentQueue
+                  alerts={alerts}
+                  unacknowledgedCount={unacknowledgedCount}
+                  alertFilter={alertFilter}
+                  onFilterChange={setAlertFilter}
+                  onToggleAcknowledge={toggleAcknowledge}
+                  onResetAlerts={handleResetAlerts}
+                  onOpenEvidence={handleOpenEvidence}
+                  onOpenEvidenceGallery={handleOpenEvidenceGallery}
+                />
               </div>
-            </div>
+            )}
+          </main>
+        )}
+      </div>
 
-            {/* Live AI Biometric & Tailgating Verification Control */}
-            <div className="mt-1 bg-slate-950/80 rounded-lg border border-slate-800 p-3.5">
-              <div className="flex flex-wrap items-center justify-between gap-3 mb-2.5">
-                <div className="flex items-center gap-2">
-                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                  <span className="text-xs font-mono font-semibold tracking-wider text-slate-300 uppercase">
-                    Live AI Verification Engine (YOLOv8 + ArcFace)
-                  </span>
-                </div>
-                <span className="text-[11px] font-mono text-slate-500">
-                  Real-time optical frame evaluation &amp; tailgating check
-                </span>
-              </div>
-
-              {/* Feedback Banner */}
-              {verifyFeedback && (
-                <div
-                  className={`mb-3 p-2.5 rounded-lg border text-xs font-mono flex items-center gap-2 ${
-                    verifyFeedback.type === 'success'
-                      ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
-                      : verifyFeedback.type === 'warning'
-                      ? 'bg-amber-950/40 border-amber-500/40 text-amber-300'
-                      : 'bg-red-950/40 border-red-500/40 text-red-300'
-                  }`}
-                >
-                  {verifyFeedback.type === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />}
-                  {verifyFeedback.type === 'warning' && <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />}
-                  {verifyFeedback.type === 'error' && <XCircle className="w-4 h-4 text-red-400 shrink-0" />}
-                  <span className="flex-1">{verifyFeedback.message}</span>
-                </div>
-              )}
-
-              <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
-                {/* Employee ID to Scan Input */}
-                <div className="sm:col-span-5">
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="block text-[11px] font-mono text-slate-400">
-                      Employee ID to Scan
-                    </label>
-                    <span className="text-[10px] font-mono text-emerald-400/80">
-                      {enrolledUsers.length > 0 ? `${enrolledUsers.length} in Registry` : '0 Enrolled'}
-                    </span>
-                  </div>
-                  <input
-                    type="text"
-                    list="enrolled-employees-list"
-                    value={verifyEmployeeId}
-                    onChange={(e) => setVerifyEmployeeId(e.target.value)}
-                    placeholder="e.g. EMP-1234 or AUTO"
-                    disabled={isVerifying}
-                    className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-xs font-mono text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-emerald-500 transition-colors"
-                  />
-                  <datalist id="enrolled-employees-list">
-                    <option value="AUTO">AUTO (1:N Biometric Retrieval)</option>
-                    {enrolledUsers.map((u) => (
-                      <option key={u.employee_id} value={u.employee_id}>
-                        {u.name} ({u.employee_id}) - {u.roll}
-                      </option>
-                    ))}
-                  </datalist>
-                </div>
-
-
-                {/* Target Camera Selector Dropdown */}
-                <div className="sm:col-span-4">
-                  <label className="block text-[11px] font-mono text-slate-400 mb-1">
-                    Target Camera
-                  </label>
-                  <select
-                    value={verifyDeviceId}
-                    onChange={(e) => setVerifyDeviceId(Number(e.target.value))}
-                    disabled={isVerifying}
-                    className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-xs font-mono text-slate-200 focus:outline-none focus:border-emerald-500 transition-colors"
-                  >
-                    <option value={0}>Device 0 &mdash; Mobile (Iriun)</option>
-                    <option value={1}>Device 1 &mdash; Laptop Webcam</option>
-                  </select>
-                </div>
-
-                {/* Trigger Live AI Verification Button */}
-                <div className="sm:col-span-3">
-                  <button
-                    onClick={handleLiveVerification}
-                    disabled={isVerifying}
-                    className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-xs font-semibold transition-all shadow-md shadow-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {isVerifying ? (
-                      <>
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        <span>Verifying...</span>
-                      </>
-                    ) : (
-                      <>
-                        <ShieldCheck className="w-3.5 h-3.5" />
-                        <span>Trigger Live AI</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* ===================================================================
-        {/* ===================================================================
-            RIGHT COLUMN (35% width: 4/12 columns on LG screens)
-            D. REAL-TIME ALERT DISPATCH QUEUE (Persists across reload until manual reset)
-            =================================================================== */}
-        <div className="lg:col-span-4 flex flex-col">
-          <IncidentQueue
-            alerts={alerts}
-            unacknowledgedCount={unacknowledgedCount}
-            alertFilter={alertFilter}
-            onFilterChange={setAlertFilter}
-            onToggleAcknowledge={toggleAcknowledge}
-            onResetAlerts={handleResetAlerts}
-          />
-        </div>
-      </main>
-      )}
+      {/* =====================================================================
+          3. RIGHT SIDEBAR (RECENT ALERTS PANEL)
+          ===================================================================== */}
+      <RecentAlertsPanel
+        alerts={alerts}
+        unacknowledgedCount={unacknowledgedCount}
+        onViewAllClick={() => setNavTab('incidents')}
+        onAlertClick={(alert) => toggleAcknowledge(alert.id)}
+        onResetAlerts={handleResetAlerts}
+        onOpenEvidence={handleOpenEvidence}
+        onOpenEvidenceGallery={handleOpenEvidenceGallery}
+      />
 
       {/* =====================================================================
           SOURCE CONFIGURATION MODAL (PER-TILE ASSIGNMENT)
           ===================================================================== */}
       {selectedCamForConfig && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-[#0f172a] border border-[#1e293b] rounded-lg max-w-md w-full p-5 shadow-2xl flex flex-col gap-4 font-sans">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-[#0b132b] border border-[#162347] rounded-2xl max-w-md w-full p-5 shadow-2xl flex flex-col gap-4 font-sans animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-3 border-b border-[#162347]">
               <div className="flex items-center gap-2">
-                <Settings className="w-5 h-5 text-emerald-400" />
-                <h3 className="font-mono text-base font-bold text-slate-100">
+                <Camera className="w-5 h-5 text-blue-400" />
+                <h3 className="font-bold text-base text-white">
                   Configure Source // {selectedCamForConfig.id}
                 </h3>
               </div>
-              <button
-                onClick={() => {
-                  setSelectedCamForConfig(null);
-                  setUploadMessage(null);
-                }}
-                className="text-slate-400 hover:text-white p-1 rounded hover:bg-slate-800"
+              <Button
+                onClick={() => setSelectedCamForConfig(null)}
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 text-slate-400 hover:text-white"
               >
                 <X className="w-4 h-4" />
-              </button>
+              </Button>
             </div>
 
             <div className="text-xs text-slate-400">
-              Select stream ingestion source for <strong className="text-slate-200">{selectedCamForConfig.name}</strong> ({selectedCamForConfig.zone}):
+              Select stream ingestion source for <strong className="text-white">{selectedCamForConfig.name}</strong> ({selectedCamForConfig.zone}):
             </div>
 
-            {/* Source Options List */}
-            <div className="space-y-2.5">
-              {/* 1. Local Hardware Webcam with Device ID Selector */}
+            {/* Source Options */}
+            <div className="space-y-3">
+              {/* Hardware Webcam */}
               <div
-                className={`p-3 rounded-lg border transition-colors ${
+                className={`p-3.5 rounded-xl border transition-colors ${
                   selectedCamForConfig.sourceType === 'WEBCAM'
-                    ? 'bg-emerald-950/30 border-emerald-500/50'
-                    : 'bg-slate-900 border-slate-800'
+                    ? 'bg-blue-600/10 border-blue-500/50'
+                    : 'bg-[#0e1838] border-[#162347]'
                 }`}
               >
                 <div className="flex items-start gap-3">
-                  <Camera className="w-5 h-5 text-emerald-400 mt-0.5 shrink-0" />
+                  <Camera className="w-5 h-5 text-blue-400 mt-0.5 shrink-0" />
                   <div className="flex-1">
                     <div className="flex items-center justify-between">
-                      <span className="font-mono text-xs font-bold text-slate-200">
+                      <span className="text-xs font-bold text-white">
                         Local Hardware Webcam (DirectShow)
                       </span>
-                      <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/40">
-                        DEV {modalDeviceId} SELECTED
+                      <span className="text-[10px] font-mono text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-500/30">
+                        DEV {modalDeviceId}
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-400 mt-0.5 mb-2.5">
-                      Stream from physical or virtual camera device index concurrently.
-                    </p>
 
-                    {/* Device Index Quick Selectors */}
-                    <div className="flex flex-col gap-2">
-                      <label className="text-[10px] font-mono text-slate-400 uppercase tracking-wider">
-                        Select Hardware Device Index:
-                      </label>
-                      <div className="grid grid-cols-3 gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setModalDeviceId(0)}
-                          className={`px-2 py-1.5 rounded text-left border transition-all ${
-                            modalDeviceId === 0
-                              ? 'bg-emerald-600 text-white border-emerald-400 font-bold shadow-sm'
-                              : 'bg-slate-950 hover:bg-slate-800 text-slate-300 border-slate-700'
-                          }`}
-                        >
-                          <div className="font-mono text-xs font-semibold">Dev 0</div>
-                          <div className="text-[9px] opacity-80 truncate">Iriun / Mobile</div>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => setModalDeviceId(1)}
-                          className={`px-2 py-1.5 rounded text-left border transition-all ${
-                            modalDeviceId === 1
-                              ? 'bg-emerald-600 text-white border-emerald-400 font-bold shadow-sm'
-                              : 'bg-slate-950 hover:bg-slate-800 text-slate-300 border-slate-700'
-                          }`}
-                        >
-                          <div className="font-mono text-xs font-semibold">Dev 1</div>
-                          <div className="text-[9px] opacity-80 truncate">Laptop Webcam</div>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => setModalDeviceId(2)}
-                          className={`px-2 py-1.5 rounded text-left border transition-all ${
-                            modalDeviceId === 2
-                              ? 'bg-emerald-600 text-white border-emerald-400 font-bold shadow-sm'
-                              : 'bg-slate-950 hover:bg-slate-800 text-slate-300 border-slate-700'
-                          }`}
-                        >
-                          <div className="font-mono text-xs font-semibold">Dev 2</div>
-                          <div className="text-[9px] opacity-80 truncate">HD Sensor</div>
-                        </button>
-                      </div>
-
-                      {/* Custom Numeric Input for other indices */}
-                      <div className="flex items-center gap-2 mt-1">
-                        <span className="text-[11px] font-mono text-slate-400">Custom Index:</span>
-                        <input
-                          type="number"
-                          min={0}
-                          max={10}
-                          value={modalDeviceId}
-                          onChange={(e) => setModalDeviceId(Math.max(0, parseInt(e.target.value) || 0))}
-                          className="w-16 px-2 py-1 bg-slate-950 border border-slate-700 rounded text-xs font-mono text-slate-200 focus:outline-none focus:border-emerald-500"
-                        />
-                        <span className="text-[10px] font-mono text-slate-500 truncate">
-                          /api/webcam-stream/{modalDeviceId}
-                        </span>
-                      </div>
-
-                      {/* Action Button to Assign Source */}
-                      <button
+                    <div className="grid grid-cols-3 gap-2 mt-2.5">
+                      <Button
                         type="button"
-                        onClick={() => {
-                          handleAssignSource(
-                            selectedCamForConfig.id,
-                            'WEBCAM',
-                            `http://127.0.0.1:8000/api/webcam-stream/${modalDeviceId}`,
-                            undefined,
-                            modalDeviceId
-                          );
-                          setSelectedCamForConfig(null);
-                        }}
-                        className="mt-2 w-full py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-xs font-bold transition-colors shadow-sm flex items-center justify-center gap-1.5"
+                        onClick={() => setModalDeviceId(0)}
+                        variant={modalDeviceId === 0 ? 'default' : 'secondary'}
+                        className={`h-auto px-2 py-1.5 rounded-lg text-left text-xs flex flex-col items-start ${
+                          modalDeviceId === 0
+                            ? 'bg-blue-600 hover:bg-blue-500 text-white font-bold'
+                            : 'bg-[#0b132b] hover:bg-[#111c3d] text-slate-300 border border-[#162347]'
+                        }`}
                       >
-                        <Camera className="w-3.5 h-3.5" />
-                        <span>Assign Stream // Device {modalDeviceId}</span>
-                      </button>
+                        <div className="font-bold">Dev 0</div>
+                        <div className="text-[10px] text-slate-400">Iriun / Mobile</div>
+                      </Button>
+
+                      <Button
+                        type="button"
+                        onClick={() => setModalDeviceId(1)}
+                        variant={modalDeviceId === 1 ? 'default' : 'secondary'}
+                        className={`h-auto px-2 py-1.5 rounded-lg text-left text-xs flex flex-col items-start ${
+                          modalDeviceId === 1
+                            ? 'bg-blue-600 hover:bg-blue-500 text-white font-bold'
+                            : 'bg-[#0b132b] hover:bg-[#111c3d] text-slate-300 border border-[#162347]'
+                        }`}
+                      >
+                        <div className="font-bold">Dev 1</div>
+                        <div className="text-[10px] text-slate-400">Webcam</div>
+                      </Button>
+
+                      <Button
+                        type="button"
+                        onClick={() => setModalDeviceId(2)}
+                        variant={modalDeviceId === 2 ? 'default' : 'secondary'}
+                        className={`h-auto px-2 py-1.5 rounded-lg text-left text-xs flex flex-col items-start ${
+                          modalDeviceId === 2
+                            ? 'bg-blue-600 hover:bg-blue-500 text-white font-bold'
+                            : 'bg-[#0b132b] hover:bg-[#111c3d] text-slate-300 border border-[#162347]'
+                        }`}
+                      >
+                        <div className="font-bold">Dev 2</div>
+                        <div className="text-[10px] text-slate-400">Aux Cam</div>
+                      </Button>
                     </div>
+
+                    <Button
+                      type="button"
+                      onClick={() => {
+                        const targetId = selectedCamForConfig.id;
+                        setCameras((prev) =>
+                          prev.map((c) =>
+                            c.id === targetId
+                              ? {
+                                  ...c,
+                                  sourceType: 'WEBCAM',
+                                  deviceId: modalDeviceId,
+                                  streamUrl: `http://127.0.0.1:8000/api/webcam-stream/${modalDeviceId}`,
+                                  isOnline: true,
+                                }
+                              : c
+                          )
+                        );
+                        setSelectedCamForConfig(null);
+                      }}
+                      className="mt-3 w-full h-8 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg text-xs"
+                    >
+                      Apply Device {modalDeviceId}
+                    </Button>
                   </div>
                 </div>
               </div>
 
-              {/* 2. Backend Video Loop */}
-              <button
+              {/* Backend Test Video Loop */}
+              <div
                 onClick={() => {
-                  handleAssignSource(
-                    selectedCamForConfig.id,
-                    'BACKEND_LOOP',
-                    'http://127.0.0.1:8000/api/video-stream'
+                  const targetId = selectedCamForConfig.id;
+                  setCameras((prev) =>
+                    prev.map((c) =>
+                      c.id === targetId
+                        ? {
+                            ...c,
+                            sourceType: 'BACKEND_LOOP',
+                            streamUrl: 'http://127.0.0.1:8000/api/video-stream',
+                            isOnline: true,
+                          }
+                        : c
+                    )
                   );
                   setSelectedCamForConfig(null);
                 }}
-                className={`w-full p-3 rounded-lg border text-left flex items-start gap-3 transition-colors ${
-                  selectedCamForConfig.sourceType === 'BACKEND_LOOP'
-                    ? 'bg-emerald-950/30 border-emerald-500/50 text-slate-100'
-                    : 'bg-slate-900 border-slate-800 hover:border-slate-700 text-slate-300'
-                }`}
+                className="p-3.5 bg-[#0e1838] hover:bg-[#162347] border border-[#162347] rounded-xl cursor-pointer transition-colors"
               >
-                <Video className="w-5 h-5 text-emerald-400 mt-0.5 shrink-0" />
-                <div>
-                  <div className="font-mono text-xs font-bold text-slate-200">
-                    Backend Loop (test_video.mp4)
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-0.5">
-                    Continuous surveillance simulation feed at <code className="text-emerald-400">/api/video-stream</code>.
-                  </div>
-                </div>
-              </button>
+                <div className="font-bold text-xs text-white">Default Video Test Loop</div>
+                <div className="text-[11px] text-slate-400 mt-0.5">Continuous CCTV simulation loop (/api/video-stream)</div>
+              </div>
 
-              {/* 3. Upload Local MP4 File */}
-              <div
-                className={`p-3 rounded-lg border transition-colors ${
-                  selectedCamForConfig.sourceType === 'CUSTOM_UPLOAD'
-                    ? 'bg-emerald-950/30 border-emerald-500/50'
-                    : 'bg-slate-900 border-slate-800'
-                }`}
-              >
+              {/* Upload Custom Sample Video File */}
+              <div className="p-3.5 bg-[#0e1838] border border-[#162347] rounded-xl">
                 <div className="flex items-start gap-3">
-                  <Upload className="w-5 h-5 text-emerald-400 mt-0.5 shrink-0" />
+                  <Upload className="w-5 h-5 text-blue-400 mt-0.5 shrink-0" />
                   <div className="flex-1">
-                    <div className="font-mono text-xs font-bold text-slate-200">
-                      Upload Local MP4 File
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-xs text-white">
+                        Upload Custom Sample Video
+                      </span>
+                      <span className="text-[10px] font-mono text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-500/30">
+                        MP4 / AVI / MOV
+                      </span>
                     </div>
-                    <div className="text-[11px] text-slate-400 mt-0.5 mb-2">
-                      Uploads video to backend and attaches dynamic MJPEG stream.
+                    <div className="text-[11px] text-slate-400 mt-0.5 mb-2.5">
+                      Upload local footage to feed into this camera node for live AI detection &amp; testing.
                     </div>
                     <input
                       ref={fileInputRef}
                       type="file"
-                      accept="video/mp4,video/*"
+                      accept="video/mp4,video/avi,video/mkv,video/quicktime,video/*"
                       onChange={handleFileUpload}
                       disabled={uploadLoading}
-                      className="block w-full text-xs text-slate-400 file:mr-2 file:py-1 file:px-2.5 file:rounded file:border file:border-slate-700 file:text-xs file:font-mono file:bg-slate-800 file:text-slate-200 hover:file:bg-slate-700 cursor-pointer"
+                      className="block w-full text-xs text-slate-400 file:mr-2.5 file:py-1.5 file:px-3 file:rounded-lg file:border file:border-[#162347] file:text-xs file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-500 file:cursor-pointer cursor-pointer"
                     />
                     {uploadLoading && (
-                      <div className="text-xs font-mono text-emerald-400 mt-2 flex items-center gap-1.5">
-                        <RefreshCw className="w-3 h-3 animate-spin" />
-                        Uploading to backend...
+                      <div className="text-xs font-mono text-blue-400 mt-2 flex items-center gap-1.5">
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Uploading and initializing stream...</span>
                       </div>
                     )}
                     {uploadMessage && (
-                      <div className="text-xs font-mono text-slate-300 mt-2">
-                        {uploadMessage}
+                      <div className="text-xs font-mono text-emerald-400 mt-2 flex items-center gap-1.5">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>{uploadMessage}</span>
                       </div>
                     )}
                   </div>
                 </div>
               </div>
 
-              {/* 4. Standby / Offline Pattern */}
-              <button
+              {/* Standby Idle Mode */}
+              <div
                 onClick={() => {
-                  handleAssignSource(selectedCamForConfig.id, 'STANDBY', '');
+                  const targetId = selectedCamForConfig.id;
+                  setCameras((prev) =>
+                    prev.map((c) =>
+                      c.id === targetId
+                        ? {
+                            ...c,
+                            sourceType: 'STANDBY',
+                            streamUrl: '',
+                            isOnline: false,
+                          }
+                        : c
+                    )
+                  );
                   setSelectedCamForConfig(null);
                 }}
-                className={`w-full p-3 rounded-lg border text-left flex items-start gap-3 transition-colors ${
-                  selectedCamForConfig.sourceType === 'STANDBY'
-                    ? 'bg-slate-950 border-amber-500/50 text-slate-100'
-                    : 'bg-slate-900 border-slate-800 hover:border-slate-700 text-slate-300'
-                }`}
+                className="p-3.5 bg-[#0e1838] hover:bg-[#162347] border border-[#162347] rounded-xl cursor-pointer transition-colors"
               >
-                <Radio className="w-5 h-5 text-amber-400 mt-0.5 shrink-0" />
-                <div>
-                  <div className="font-mono text-xs font-bold text-slate-200">
-                    Offline / Standby Pattern
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-0.5">
-                    Places camera in standby state with high-contrast diagnostic test card.
-                  </div>
-                </div>
-              </button>
-            </div>
-
-            <div className="pt-3 border-t border-slate-800 flex justify-end">
-              <button
-                onClick={() => {
-                  setSelectedCamForConfig(null);
-                  setUploadMessage(null);
-                }}
-                className="px-4 py-1.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-xs font-mono"
-              >
-                Close
-              </button>
+                <div className="font-bold text-xs text-slate-300">Unassign / Set to Standby</div>
+                <div className="text-[11px] text-slate-500 mt-0.5">Disconnect feed and mark channel as idle</div>
+              </div>
             </div>
           </div>
         </div>
       )}
 
       {/* =====================================================================
-          SYSTEM SETTINGS & AUDIT LOG EXPORT MODAL
-          ===================================================================== */}
-      <SettingsModal
-        isOpen={showSettingsModal}
-        onClose={() => setShowSettingsModal(false)}
-        onOpenEnroll={() => {
-          setShowEnrollModal(true);
-          setEnrollFeedback(null);
-        }}
-        onFortressAuthorized={(token, user, score, targetDate) => {
-          setFortressSession({ token, username: user, trustScore: score });
-          if (targetDate) setAuditTargetDate(targetDate);
-          setActiveView('AUDIT_LOGS');
-          setShowSettingsModal(false);
-        }}
-      />
-
-      {/* =====================================================================
-          LIVE BIOMETRIC PERSONNEL ENROLLMENT MODAL
+          SETTINGS & BIOMETRIC ENROLLMENT MODALS
           ===================================================================== */}
       <EnrollModal
         showEnrollModal={showEnrollModal}
@@ -1911,24 +1706,29 @@ export const App: React.FC = () => {
         handleEnrollSubmit={handleEnrollSubmit}
       />
 
-      {/* =====================================================================
-          INDUSTRIAL STATUS FOOTER (UNIFIED UATU BRANDING)
-          ===================================================================== */}
-      <footer className="border-t border-[#1e293b] bg-[#020617] px-4 py-2 sm:px-6 text-[11px] font-mono text-slate-500 flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-4">
-          <span>UATU PLATFORM BUILD: v1.0.0-STAGE1</span>
-          <span className="hidden sm:inline">&bull;</span>
-          <span className="hidden sm:inline">DATABASE: POSTGRESQL 16.2</span>
-          <span className="hidden sm:inline">&bull;</span>
-          <span>UNIFIED ASSISTANT FOR THREAT &amp; UNDERSTANDING (AI)</span>
-        </div>
-        <div className="flex items-center gap-3">
-          <span className="flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-            UATU TELEMETRY HARNESS ACTIVE
-          </span>
-        </div>
-      </footer>
+      <SettingsModal
+        isOpen={showSettingsModal}
+        onClose={() => setShowSettingsModal(false)}
+        onOpenEnroll={() => {
+          setShowEnrollModal(true);
+          setEnrollFeedback(null);
+        }}
+        onFortressAuthorized={(token, user, score, targetDate) => {
+          setFortressSession({ token, username: user, trustScore: score });
+          if (targetDate) setAuditTargetDate(targetDate);
+          setActiveView('AUDIT_LOGS');
+          setShowSettingsModal(false);
+        }}
+      />
+
+      {/* Forensic Evidence Snapshot Modal & Gallery */}
+      <EvidenceModal
+        isOpen={isEvidenceModalOpen}
+        onClose={() => setIsEvidenceModalOpen(false)}
+        activeAlert={selectedEvidenceAlert}
+        initialTab={evidenceModalTab}
+        backendUrl="http://127.0.0.1:8000"
+      />
     </div>
   );
 };

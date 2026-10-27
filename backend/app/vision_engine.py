@@ -1096,6 +1096,19 @@ class SpatialTracker:
                 "fps": 0,
             }
 
+    def get_counts(self) -> dict:
+        """Returns snapshot of current spatial counts and stream telemetry."""
+        return {
+            "occupancy": getattr(self, "cached_occupancy_count", getattr(self, "occupancy_count", 0)),
+            "persons": getattr(self, "cached_persons_count", getattr(self, "occupancy_count", 0)),
+            "entries": getattr(self, "entry_count", getattr(self, "down_count", 0)),
+            "exits": getattr(self, "exit_count", getattr(self, "up_count", 0)),
+            "fps": getattr(self, "current_fps", 0.0),
+            "stream_healthy": getattr(self, "is_stream_active", True),
+            "is_crowded": getattr(self, "cached_is_crowded", False),
+            "fall_detected": getattr(self, "cached_fall_detected", False),
+        }
+
     def reset(self):
         self.up_count = 0
         self.down_count = 0

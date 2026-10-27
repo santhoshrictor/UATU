@@ -15,14 +15,52 @@
         theme: {
           extend: {
             fontFamily: {
-              sans: ['Inter', 'sans-serif'],
+              sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
               mono: ['JetBrains Mono', 'monospace'],
             },
             colors: {
               slate: {
                 850: '#151f32',
-                950: '#020617',
-              }
+                950: '#070c1b',
+              },
+              navy: {
+                950: '#060b18',
+                900: '#0b132b',
+                850: '#0e1838',
+                800: '#162347',
+                750: '#1e2f5f',
+                700: '#2a3f7a',
+              },
+              brand: {
+                blue: '#2563eb',
+                blueHover: '#1d4ed8',
+                cyan: '#06b6d4',
+              },
+              border: "hsl(var(--border, 217 33% 17%))",
+              input: "hsl(var(--input, 217 33% 17%))",
+              ring: "hsl(var(--ring, 224 76% 48%))",
+              background: "hsl(var(--background, 224 71% 4%))",
+              foreground: "hsl(var(--foreground, 213 31% 91%))",
+              primary: {
+                DEFAULT: "hsl(var(--primary, 221 83% 53%))",
+                foreground: "hsl(var(--primary-foreground, 210 40% 98%))",
+              },
+              secondary: {
+                DEFAULT: "hsl(var(--secondary, 222 47% 11%))",
+                foreground: "hsl(var(--secondary-foreground, 210 40% 98%))",
+              },
+              destructive: {
+                DEFAULT: "hsl(var(--destructive, 0 62.8% 30.6%))",
+                foreground: "hsl(var(--destructive-foreground, 210 40% 98%))",
+              },
+              muted: {
+                DEFAULT: "hsl(var(--muted, 223 47% 11%))",
+                foreground: "hsl(var(--muted-foreground, 215 20% 65%))",
+              },
+              accent: {
+                DEFAULT: "hsl(var(--accent, 217 33% 17%))",
+                foreground: "hsl(var(--accent-foreground, 210 40% 98%))",
+              },
             }
           }
         }

@@ -16,6 +16,7 @@ import {
   Check,
   Clock,
 } from 'lucide-react';
+import { Button } from './ui/button';
 
 export interface FortressAuditModalProps {
   isOpen: boolean;
@@ -216,14 +217,16 @@ export const FortressAuditModal: React.FC<FortressAuditModalProps> = ({
               </p>
             </div>
           </div>
-          <button
+          <Button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-slate-400 hover:text-white"
             title="Cancel & Close"
             aria-label="Close"
           >
             <X className="w-5 h-5" />
-          </button>
+          </Button>
         </div>
 
         {/* Modal Body */}
@@ -401,21 +404,22 @@ export const FortressAuditModal: React.FC<FortressAuditModalProps> = ({
               )}
 
               <div className="flex items-center gap-3 pt-2">
-                <button
+                <Button
                   type="button"
                   onClick={onClose}
-                  className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono text-xs transition-colors"
+                  variant="secondary"
+                  className="px-4 py-2.5 h-10 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono text-xs border border-slate-700"
                 >
                   Cancel
-                </button>
-                <button
+                </Button>
+                <Button
                   type="submit"
                   disabled={isLoading || totpCode.length !== 6}
-                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 active:bg-amber-600 disabled:opacity-50 text-slate-950 font-bold text-xs uppercase tracking-wider font-mono transition-all shadow-lg shadow-amber-950/40"
+                  className="flex-1 flex items-center justify-center gap-2 h-10 px-4 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs uppercase tracking-wider font-mono shadow-lg shadow-amber-950/40"
                 >
                   {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
                   <span>{isLoading ? 'Verifying Zero-Trust...' : 'Verify TOTP & Unlock Dashboard'}</span>
-                </button>
+                </Button>
               </div>
             </form>
           )}
@@ -498,24 +502,25 @@ export const FortressAuditModal: React.FC<FortressAuditModalProps> = ({
               ) : null}
 
               <div className="flex items-center gap-3 pt-2">
-                <button
+                <Button
                   type="button"
                   onClick={() => setStep('AUTHENTICATE')}
-                  className="flex-1 px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono text-xs transition-colors"
+                  variant="secondary"
+                  className="flex-1 px-4 py-2.5 h-10 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono text-xs border border-slate-700"
                 >
                   ← Back to Authenticator Sign-in
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
                   onClick={async (e) => {
                     await handleVerifyTOTP(e);
                   }}
                   disabled={totpCode.length !== 6 || isLoading}
-                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 disabled:opacity-50 text-slate-950 font-bold text-xs uppercase tracking-wider font-mono transition-all"
+                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 h-10 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-bold text-xs uppercase tracking-wider font-mono"
                 >
                   {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
                   <span>Verify Code &amp; Launch</span>
-                </button>
+                </Button>
               </div>
             </div>
           )}
@@ -609,41 +614,43 @@ export const FortressAuditModal: React.FC<FortressAuditModalProps> = ({
               <div className="flex items-center gap-3 pt-2">
                 {isSuccess && onAuthorized && authorizedToken ? (
                   <>
-                    <button
+                    <Button
                       type="button"
                       onClick={() => {
                         onAuthorized(authorizedToken, username, trustScore ?? 95, selectedDate);
                         onClose();
                       }}
-                      className="flex-1 px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-slate-950 font-bold font-mono text-xs uppercase tracking-wider transition-all shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2"
+                      className="flex-1 px-5 py-2.5 h-10 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold font-mono text-xs uppercase tracking-wider shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2"
                     >
                       <ShieldCheck className="w-4 h-4" />
                       Open Audit Logs Dashboard →
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="button"
                       onClick={onClose}
-                      className="px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono text-xs transition-colors"
+                      variant="secondary"
+                      className="px-4 py-2.5 h-10 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono text-xs border border-slate-700"
                     >
                       Close
-                    </button>
+                    </Button>
                   </>
                 ) : (
                   <>
-                    <button
+                    <Button
                       type="button"
                       onClick={handleReset}
-                      className="flex-1 px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs transition-colors"
+                      variant="secondary"
+                      className="flex-1 px-4 py-2.5 h-10 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono text-xs border border-slate-700"
                     >
                       Run Another Verification
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="button"
                       onClick={onClose}
-                      className="px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-semibold font-mono text-xs transition-colors"
+                      className="px-5 py-2.5 h-10 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold font-mono text-xs"
                     >
                       Close Gateway
-                    </button>
+                    </Button>
                   </>
                 )}
               </div>

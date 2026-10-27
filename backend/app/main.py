@@ -277,6 +277,7 @@ class CameraDeviceWorker:
         self.fall_alert_cooldown = 15.0
         self.last_fire_alert_time = 0.0
         self.fire_alert_cooldown = 15.0
+        self.last_telemetry_broadcast_time = 0.0
         self.current_fps = 0.0
 
     def _open_capture(self):
@@ -363,7 +364,14 @@ class CameraDeviceWorker:
                     if (now_ts - self.last_crowd_alert_time) >= self.crowd_alert_cooldown:
                         self.last_crowd_alert_time = now_ts
                         event_id = f"EVT-CROWD-{int(now_ts)}"
-                        snap_url = live_event_store.save_event_snapshot(event_id, annotated_frame)
+                        snap_url = live_event_store.save_event_snapshot(
+                            event_id=event_id,
+                            frame=annotated_frame,
+                            camera_id=self.camera_id,
+                            event_type="CROWD GATHERING ALERT",
+                            zone=self.zone_name,
+                            confidence_pct=95.0,
+                        )
                         detail_text = f"Crowd gathering alert (10+ persons) breached on {self.camera_id} ({self.zone_name}): {counts.get('occupancy', counts.get('persons', 0))} persons present."
                         live_event_store.record_live_event(
                             event_id=event_id,
@@ -409,7 +417,14 @@ class CameraDeviceWorker:
                     if (now_ts - self.last_fall_alert_time) >= self.fall_alert_cooldown:
                         self.last_fall_alert_time = now_ts
                         event_id = f"EVT-FALL-{int(now_ts)}"
-                        snap_url = live_event_store.save_event_snapshot(event_id, annotated_frame)
+                        snap_url = live_event_store.save_event_snapshot(
+                            event_id=event_id,
+                            frame=annotated_frame,
+                            camera_id=self.camera_id,
+                            event_type="MAN DOWN / FALL DETECTED",
+                            zone=self.zone_name,
+                            confidence_pct=94.2,
+                        )
                         fall_detail = f"Worker fall confirmed on {self.camera_id} ({self.zone_name}). Immediate assistance required."
                         live_event_store.record_live_event(
                             event_id=event_id,
@@ -460,9 +475,16 @@ class CameraDeviceWorker:
                         self.last_fire_alert_time = now_ts
                         self.tracker.last_fire_alert_time = now_ts
                         event_id = f"EVT-HAZARD-{int(now_ts)}"
-                        snap_url = live_event_store.save_event_snapshot(event_id, annotated_frame)
                         hazard_type = "CRITICAL HAZARD: FIRE / SMOKE DETECTED"
                         hazard_detail = f"Hazard identified on {self.camera_id} ({self.zone_name}). Immediate evacuation required."
+                        snap_url = live_event_store.save_event_snapshot(
+                            event_id=event_id,
+                            frame=annotated_frame,
+                            camera_id=self.camera_id,
+                            event_type=hazard_type,
+                            zone=self.zone_name,
+                            confidence_pct=96.8,
+                        )
                         live_event_store.record_live_event(
                             event_id=event_id,
                             event_type=hazard_type,
@@ -508,6 +530,22 @@ class CameraDeviceWorker:
                 with self.frame_lock:
                     self.current_jpeg = jpeg_bytes
                     self.raw_jpeg = raw_bytes
+
+                # Broadcast live camera zone telemetry every 1.5s to WebSocket clients
+                now_ts = time.time()
+                if (now_ts - getattr(self, "last_telemetry_broadcast_time", 0.0)) >= 1.5:
+                    self.last_telemetry_broadcast_time = now_ts
+                    alert_manager.broadcast_sync({
+                        "type": "TELEMETRY_UPDATE",
+                        "camera_id": self.camera_id,
+                        "counts": {
+                            "occupancy": int(counts.get("occupancy", getattr(self.tracker, "occupancy_count", 0))),
+                            "persons": int(counts.get("persons", getattr(self.tracker, "cached_persons_count", counts.get("occupancy", 0)))),
+                            "entry": int(counts.get("entry", getattr(self.tracker, "entry_count", 0))),
+                            "exit": int(counts.get("exit", getattr(self.tracker, "exit_count", 0))),
+                            "fps": round(float(self.current_fps), 1),
+                        },
+                    })
                 
                 # Dynamic adaptive frame pacing (~30 FPS target)
                 t_proc = time.perf_counter() - t_start
@@ -588,6 +626,11 @@ class MultiWebcamManager:
             for dev_id, worker in self._workers.items():
                 worker.stop()
             self._workers.clear()
+
+    @property
+    def workers(self) -> dict:
+        with self._worker_lock:
+            return dict(self._workers)
 
 
 multi_webcam_manager = MultiWebcamManager()
@@ -857,31 +900,32 @@ async def get_live_events(
     try:
         for dev_id, worker in multi_webcam_manager.workers.items():
             if worker.is_live and worker.tracker:
-                counts = worker.tracker.get_counts()
+                counts = worker.tracker.get_counts() if hasattr(worker.tracker, "get_counts") else {}
                 cam_name = worker.camera_id
                 telemetry[cam_name] = {
                     "camera_id": cam_name,
                     "zone_name": worker.zone_name,
-                    "fps": round(float(counts.get("fps", 0.0)), 1),
-                    "occupancy": int(counts.get("occupancy", 0)),
-                    "person_count": int(counts.get("persons", 0)),
-                    "entry_count": int(counts.get("entries", 0)),
-                    "exit_count": int(counts.get("exits", 0)),
-                    "stream_healthy": counts.get("stream_healthy", True),
+                    "fps": round(float(counts.get("fps", worker.current_fps or 0.0)), 1),
+                    "occupancy": int(counts.get("occupancy", getattr(worker.tracker, "occupancy_count", 0))),
+                    "person_count": int(counts.get("persons", getattr(worker.tracker, "cached_persons_count", counts.get("occupancy", 0)))),
+                    "entry_count": int(counts.get("entries", getattr(worker.tracker, "entry_count", 0))),
+                    "exit_count": int(counts.get("exits", getattr(worker.tracker, "exit_count", 0))),
+                    "stream_healthy": counts.get("stream_healthy", worker.is_live),
                 }
 
-        for cam_name, worker in multi_file_stream_manager.workers.items():
+        for key, worker in multi_file_stream_manager.workers.items():
             if worker.running and worker.tracker:
-                counts = worker.tracker.get_counts()
-                telemetry[cam_name] = {
-                    "camera_id": cam_name,
+                counts = worker.tracker.get_counts() if hasattr(worker.tracker, "get_counts") else {}
+                cam_id = worker.camera_id
+                telemetry[cam_id] = {
+                    "camera_id": cam_id,
                     "zone_name": worker.zone,
-                    "fps": round(float(counts.get("fps", 0.0)), 1),
-                    "occupancy": int(counts.get("occupancy", 0)),
-                    "person_count": int(counts.get("persons", 0)),
-                    "entry_count": int(counts.get("entries", 0)),
-                    "exit_count": int(counts.get("exits", 0)),
-                    "stream_healthy": counts.get("stream_healthy", True),
+                    "fps": round(float(counts.get("fps", worker.current_fps or worker.fps or 0.0)), 1),
+                    "occupancy": int(counts.get("occupancy", getattr(worker.tracker, "occupancy_count", 0))),
+                    "person_count": int(counts.get("persons", getattr(worker.tracker, "cached_persons_count", counts.get("occupancy", 0)))),
+                    "entry_count": int(counts.get("entries", getattr(worker.tracker, "entry_count", 0))),
+                    "exit_count": int(counts.get("exits", getattr(worker.tracker, "exit_count", 0))),
+                    "stream_healthy": counts.get("stream_healthy", worker.running),
                 }
     except Exception as ex:
         logger.debug(f"Telemetry counters collection notice: {ex}")
@@ -891,6 +935,7 @@ async def get_live_events(
         "count": len(events),
         "events": events,
         "camera_telemetry": telemetry,
+        "telemetry": telemetry,
     }
 
 
@@ -964,11 +1009,17 @@ async def acknowledge_live_event(
 
 
 @app.post("/api/live-events/clear")
+@app.post("/api/live-events/reset")
 async def clear_live_events():
     """
     Clear all live events from LiveEventStore and persist empty array to disk.
+    Broadcasts ALERTS_CLEARED to all connected dashboards via WebSocket.
     """
     live_event_store.clear_events()
+    alert_manager.broadcast_sync({
+        "type": "ALERTS_CLEARED",
+        "message": "All live alerts cleared by operator.",
+    })
     return {
         "status": "success",
         "message": "All live events cleared successfully.",
@@ -976,18 +1027,75 @@ async def clear_live_events():
     }
 
 
+@app.get("/api/snapshots")
+@app.get("/api/snapshots/recent")
+async def list_recent_snapshots(limit: int = 50):
+    """
+    Returns recent anomaly snapshot records with timestamp, camera_id, and anomaly metadata.
+    """
+    snapshots_dir = BACKEND_DIR / "snapshots"
+    if not snapshots_dir.exists():
+        return {"status": "success", "count": 0, "snapshots": []}
+
+    results = []
+    jpg_files = sorted(
+        snapshots_dir.glob("*.jpg"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+    for p in jpg_files[:limit]:
+        sidecar = p.with_suffix(".jpg.json")
+        meta = {}
+        if sidecar.exists():
+            try:
+                with open(sidecar, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                pass
+
+        fname = p.name
+        ts = meta.get("timestamp") or datetime.fromtimestamp(p.stat().st_mtime, IST).strftime("%Y-%m-%d %H:%M:%S")
+        cam = meta.get("camera_id") or (fname.split("_")[0] if "_" in fname else "CAM-01")
+        atype = meta.get("anomaly_type") or (fname.split("_")[1].replace("_", " ").upper() if "_" in fname else "ANOMALY")
+
+        results.append({
+            "filename": fname,
+            "url": f"http://127.0.0.1:8000/api/snapshots/{fname}",
+            "timestamp": ts,
+            "camera_id": cam,
+            "anomaly_type": atype,
+            "zone": meta.get("zone", ""),
+            "confidence_pct": meta.get("confidence_pct", 95.0),
+            "event_id": meta.get("event_id", fname.replace(".jpg", "")),
+            "size_bytes": p.stat().st_size,
+        })
+
+    return {
+        "status": "success",
+        "count": len(results),
+        "snapshots": results,
+    }
+
+
 @app.get("/api/snapshots/{filename}")
 async def get_snapshot(filename: str):
     """
     Serve live alert snapshots stored in backend/snapshots/.
+    Supports exact structured filename, legacy event ID, and partial match.
     """
     safe_name = os.path.basename(filename)
     file_path = BACKEND_DIR / "snapshots" / safe_name
     if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Snapshot '{safe_name}' not found.",
-        )
+        stem = safe_name.replace(".jpg", "")
+        matches = list((BACKEND_DIR / "snapshots").glob(f"*{stem}*.jpg"))
+        if matches:
+            file_path = matches[0]
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Snapshot '{safe_name}' not found.",
+            )
     return FileResponse(file_path, media_type="image/jpeg")
 
 
@@ -1705,6 +1813,7 @@ class FileStreamWorker:
         self.fall_alert_cooldown = 15.0
         self.last_fire_alert_time = 0.0
         self.fire_alert_cooldown = 15.0
+        self.last_telemetry_broadcast_time = 0.0
         self.current_fps = 0.0
         self.active_clients = 0
 
@@ -1845,7 +1954,14 @@ class FileStreamWorker:
                         if (now_ts - self.last_fall_alert_time) >= self.fall_alert_cooldown:
                             self.last_fall_alert_time = now_ts
                             event_id = f"EVT-FALL-{int(now_ts)}"
-                            snap_url = live_event_store.save_event_snapshot(event_id, frame)
+                            snap_url = live_event_store.save_event_snapshot(
+                                event_id=event_id,
+                                frame=frame,
+                                camera_id=self.camera_id,
+                                event_type="MAN DOWN / FALL DETECTED",
+                                zone=self.zone,
+                                confidence_pct=94.2,
+                            )
                             fall_detail = f"Worker fall confirmed on {self.camera_id} ({self.zone}). Immediate assistance required."
                             live_event_store.record_live_event(
                                 event_id=event_id,
@@ -1896,9 +2012,16 @@ class FileStreamWorker:
                             self.last_fire_alert_time = now_ts
                             self.tracker.last_fire_alert_time = now_ts
                             event_id = f"EVT-HAZARD-{int(now_ts)}"
-                            snap_url = live_event_store.save_event_snapshot(event_id, frame)
                             hazard_type = "CRITICAL HAZARD: FIRE / SMOKE DETECTED"
                             hazard_detail = f"Hazard identified on {self.camera_id} ({self.zone}). Immediate evacuation required."
+                            snap_url = live_event_store.save_event_snapshot(
+                                event_id=event_id,
+                                frame=frame,
+                                camera_id=self.camera_id,
+                                event_type=hazard_type,
+                                zone=self.zone,
+                                confidence_pct=96.8,
+                            )
                             live_event_store.record_live_event(
                                 event_id=event_id,
                                 event_type=hazard_type,
@@ -1943,6 +2066,22 @@ class FileStreamWorker:
                     with self.frame_lock:
                         self.current_jpeg = jpeg_bytes
                         self.raw_jpeg = raw_bytes
+
+                    # Broadcast real-time zone telemetry every 1.5s to WebSocket clients
+                    now_ts = time.time()
+                    if (now_ts - getattr(self, "last_telemetry_broadcast_time", 0.0)) >= 1.5:
+                        self.last_telemetry_broadcast_time = now_ts
+                        alert_manager.broadcast_sync({
+                            "type": "TELEMETRY_UPDATE",
+                            "camera_id": self.camera_id,
+                            "counts": {
+                                "occupancy": int(counts.get("occupancy", getattr(self.tracker, "occupancy_count", 0))),
+                                "persons": int(counts.get("persons", getattr(self.tracker, "cached_persons_count", counts.get("occupancy", 0)))),
+                                "entry": int(counts.get("entry", getattr(self.tracker, "entry_count", 0))),
+                                "exit": int(counts.get("exit", getattr(self.tracker, "exit_count", 0))),
+                                "fps": round(float(self.current_fps), 1),
+                            },
+                        })
 
                     t_proc = time.perf_counter() - t_start
                     sleep_dur = max(0.005, frame_delay - t_proc)
@@ -2022,6 +2161,11 @@ class MultiFileStreamManager:
             for _, worker in self._workers.items():
                 worker.stop()
             self._workers.clear()
+
+    @property
+    def workers(self) -> dict:
+        with self._worker_lock:
+            return dict(self._workers)
 
 
 multi_file_stream_manager = MultiFileStreamManager()

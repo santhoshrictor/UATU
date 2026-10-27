@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import shutil
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -86,29 +88,137 @@ class LiveEventStore:
             logger.error(f"Failed to persist live events to {DB_FILE}: {e}")
 
     def save_event_snapshot(
-        self, event_id: str, frame: Optional[np.ndarray]
+        self,
+        event_id: str,
+        frame: Optional[np.ndarray],
+        camera_id: str = "CAM-01",
+        event_type: str = "ANOMALY",
+        timestamp_str: Optional[str] = None,
+        confidence_pct: float = 0.0,
+        zone: str = "",
     ) -> Optional[str]:
-        """Save triggering OpenCV frame as a high-quality JPEG snapshot and return its public URL."""
+        """Save triggering OpenCV frame as a high-quality JPEG snapshot with burned-in HUD metadata,
+        structured filename (CAM-03_fall_detection_YYYY-MM-DD_HH-MM-SS.jpg), and JSON sidecar.
+        """
         if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
             return None
 
         try:
             SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+            now = datetime.now(IST)
+            if not timestamp_str:
+                timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
+            date_time_slug = now.strftime("%Y-%m-%d_%H-%M-%S")
             safe_id = "".join(c for c in event_id if c.isalnum() or c in ("-", "_"))
-            filename = f"{safe_id}.jpg"
-            file_path = SNAPSHOTS_DIR / filename
+            cam_clean = re.sub(r"[^A-Za-z0-9_-]", "", camera_id) or "CAM-01"
+            anomaly_slug = re.sub(r"[^a-z0-9]+", "_", event_type.lower()).strip("_") or "anomaly"
+
+            # Requirement 3: Structured filename format, e.g., CAM-03_fall_detection_2026-10-27_11-58-00.jpg
+            # Incorporating safe_id ensures total uniqueness across multiple rapid anomalies
+            structured_filename = f"{cam_clean}_{anomaly_slug}_{date_time_slug}_{safe_id}.jpg"
+            legacy_filename = f"{safe_id}.jpg"
+
+            # Requirement 2: Timestamp & Metadata Burn-in directly onto the image
+            annotated_img = frame.copy()
+            h, w = annotated_img.shape[:2]
+
+            # Bottom HUD Banner (semi-transparent dark background)
+            banner_h = max(38, int(h * 0.065))
+            overlay = annotated_img.copy()
+            cv2.rectangle(overlay, (0, h - banner_h), (w, h), (10, 15, 30), -1)
+            # Red accent stripe on top of banner
+            cv2.line(overlay, (0, h - banner_h), (w, h - banner_h), (0, 0, 225), 2)
+            cv2.addWeighted(overlay, 0.85, annotated_img, 0.15, 0, annotated_img)
+
+            # Top-left alert evidence badge
+            badge_w = 170
+            badge_h = 28
+            cv2.rectangle(annotated_img, (10, 10), (10 + badge_w, 10 + badge_h), (0, 0, 180), -1)
+            cv2.putText(
+                annotated_img,
+                "CRITICAL EVIDENCE",
+                (16, 28),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+
+            # Bottom Left: Anomaly label & Camera ID
+            zone_desc = f" [{zone}]" if zone else ""
+            left_text = f"ANOMALY: {event_type.upper()} | CAM: {camera_id}{zone_desc}"
+            if len(left_text) > 55:
+                left_text = left_text[:52] + "..."
+            cv2.putText(
+                annotated_img,
+                left_text,
+                (14, h - int(banner_h * 0.35)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+
+            # Bottom Right: Exact timestamp
+            right_text = f"{timestamp_str} IST"
+            cv2.putText(
+                annotated_img,
+                right_text,
+                (max(14, w - 210), h - int(banner_h * 0.35)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                (0, 225, 255),
+                1,
+                cv2.LINE_AA,
+            )
 
             # Encode as JPEG quality 85
             success, encoded_img = cv2.imencode(
-                ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+                ".jpg", annotated_img, [int(cv2.IMWRITE_JPEG_QUALITY), 85]
             )
-            if success:
+            img_bytes = encoded_img.tobytes() if success else None
+
+            file_path = SNAPSHOTS_DIR / structured_filename
+            legacy_path = SNAPSHOTS_DIR / legacy_filename
+
+            if img_bytes:
                 with open(file_path, "wb") as f:
-                    f.write(encoded_img.tobytes())
-                return f"http://127.0.0.1:8000/api/snapshots/{filename}"
+                    f.write(img_bytes)
+                with open(legacy_path, "wb") as f:
+                    f.write(img_bytes)
             else:
-                cv2.imwrite(str(file_path), frame)
-                return f"http://127.0.0.1:8000/api/snapshots/{filename}"
+                cv2.imwrite(str(file_path), annotated_img)
+                cv2.imwrite(str(legacy_path), annotated_img)
+
+            # Save structured metadata sidecar JSON (both .json and .jpg.json for universal compatibility)
+            stem = structured_filename[:-4] if structured_filename.endswith(".jpg") else structured_filename
+            sidecar_path = SNAPSHOTS_DIR / f"{stem}.json"
+            sidecar_alt = SNAPSHOTS_DIR / f"{structured_filename}.json"
+            metadata_record = {
+                "event_id": event_id,
+                "camera_id": camera_id,
+                "anomaly_type": event_type,
+                "timestamp": timestamp_str,
+                "zone": zone,
+                "confidence_pct": round(float(confidence_pct), 1),
+                "filename": structured_filename,
+                "url": f"http://127.0.0.1:8000/api/snapshots/{structured_filename}",
+            }
+            try:
+                with open(sidecar_path, "w", encoding="utf-8") as f:
+                    json.dump(metadata_record, f, indent=2)
+                with open(sidecar_alt, "w", encoding="utf-8") as f:
+                    json.dump(metadata_record, f, indent=2)
+            except Exception as e:
+                logger.debug(f"Sidecar save note: {e}")
+
+            logger.info(
+                f"Saved anomaly snapshot: {structured_filename} with burned-in timestamp and metadata."
+            )
+            return f"http://127.0.0.1:8000/api/snapshots/{structured_filename}"
         except Exception as e:
             logger.warning(f"Could not save snapshot for event {event_id}: {e}")
             return None
@@ -158,7 +268,15 @@ class LiveEventStore:
 
         # Generate live snapshot URL if frame is available and snapshot_url not provided
         if snapshot_url is None and frame is not None:
-            snapshot_url = self.save_event_snapshot(event_id, frame)
+            snapshot_url = self.save_event_snapshot(
+                event_id=event_id,
+                frame=frame,
+                camera_id=camera_id,
+                event_type=event_type,
+                timestamp_str=now.strftime("%Y-%m-%d %H:%M:%S"),
+                confidence_pct=confidence_pct,
+                zone=zone,
+            )
 
         # Build comprehensive live event record
         event_record: Dict[str, Any] = {
@@ -308,7 +426,87 @@ class LiveEventStore:
                 pass
             return True
 
+    def list_recent_snapshots(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """List recently saved anomaly snapshots with associated sidecar metadata."""
+        if not SNAPSHOTS_DIR.exists():
+            return []
+
+        results = []
+        jpg_files = sorted(
+            SNAPSHOTS_DIR.glob("*.jpg"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+
+        for p in jpg_files[:limit]:
+            sidecar = p.with_suffix(".json")
+            if not sidecar.exists():
+                sidecar = p.with_suffix(".jpg.json")
+
+            meta: Dict[str, Any] = {}
+            if sidecar.exists():
+                try:
+                    with open(sidecar, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                except Exception:
+                    pass
+
+            fname = p.name
+            ts = meta.get("timestamp") or datetime.fromtimestamp(p.stat().st_mtime, IST).strftime("%Y-%m-%d %H:%M:%S")
+            cam = meta.get("camera_id") or (fname.split("_")[0] if "_" in fname else "CAM-01")
+            atype = meta.get("anomaly_type") or (fname.split("_")[1].replace("_", " ").upper() if "_" in fname else "ANOMALY")
+
+            results.append({
+                "filename": fname,
+                "url": f"http://127.0.0.1:8000/api/snapshots/{fname}",
+                "timestamp": ts,
+                "camera_id": cam,
+                "anomaly_type": atype,
+                "zone": meta.get("zone", ""),
+                "confidence_pct": meta.get("confidence_pct", 95.0),
+                "event_id": meta.get("event_id", fname.replace(".jpg", "")),
+                "size_bytes": p.stat().st_size,
+            })
+
+        return results
 
 
 # Global Singleton instance
 live_event_store = LiveEventStore()
+
+
+# Module-level convenience wrappers
+def save_event_snapshot(
+    event_id: str,
+    frame: Optional[np.ndarray],
+    camera_id: str = "CAM-01",
+    event_type: str = "ANOMALY",
+    timestamp_str: Optional[str] = None,
+    confidence_pct: float = 0.0,
+    zone: str = "",
+) -> Optional[str]:
+    return live_event_store.save_event_snapshot(
+        event_id=event_id,
+        frame=frame,
+        camera_id=camera_id,
+        event_type=event_type,
+        timestamp_str=timestamp_str,
+        confidence_pct=confidence_pct,
+        zone=zone,
+    )
+
+
+def list_recent_snapshots(limit: int = 50) -> List[Dict[str, Any]]:
+    return live_event_store.list_recent_snapshots(limit=limit)
+
+
+def record_live_event(*args, **kwargs):
+    return live_event_store.record_live_event(*args, **kwargs)
+
+
+def get_events(*args, **kwargs):
+    return live_event_store.get_events(*args, **kwargs)
+
+
+def clear_events():
+    return live_event_store.clear_events()

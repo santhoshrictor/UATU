@@ -4,18 +4,24 @@ import {
   RotateCcw,
   CheckCircle2,
   Check,
+  Camera,
 } from 'lucide-react';
+import { Button } from './ui/button';
 
 export type AlertSeverity = 'CRITICAL' | 'WARNING' | 'INFO';
 
 export interface IncidentAlert {
   id: string;
   timestamp: string;
+  time?: string;
   zone: string;
   camera?: string;
   type: string;
   severity: AlertSeverity;
+  level?: AlertSeverity;
   detail: string;
+  snapshot_url?: string;
+  confidence_pct?: number;
   acknowledged: boolean;
   acknowledgedAt?: string;
   eventRef?: string;
@@ -28,6 +34,8 @@ export interface IncidentQueueProps {
   onFilterChange: (filter: 'ALL' | 'UNACKNOWLEDGED') => void;
   onToggleAcknowledge: (id: string) => void;
   onResetAlerts: () => void;
+  onOpenEvidence?: (alert: IncidentAlert) => void;
+  onOpenEvidenceGallery?: () => void;
 }
 
 export const IncidentQueue: React.FC<IncidentQueueProps> = ({
@@ -37,6 +45,8 @@ export const IncidentQueue: React.FC<IncidentQueueProps> = ({
   onFilterChange,
   onToggleAcknowledge,
   onResetAlerts,
+  onOpenEvidence,
+  onOpenEvidenceGallery,
 }) => {
   const filteredAlerts = React.useMemo(() => {
     if (alertFilter === 'UNACKNOWLEDGED') {
@@ -61,17 +71,32 @@ export const IncidentQueue: React.FC<IncidentQueueProps> = ({
           </div>
         </div>
 
-        {/* Action Controls: Reset Alerts & Active Count Pill */}
+        {/* Action Controls: Evidence Gallery, Reset Alerts & Active Count Pill */}
         <div className="flex items-center gap-2">
-          <button
+          {onOpenEvidenceGallery && (
+            <Button
+              onClick={onOpenEvidenceGallery}
+              variant="ghost"
+              size="sm"
+              className="flex items-center gap-1.5 h-7 px-2.5 rounded-lg bg-emerald-950/40 hover:bg-emerald-900/50 text-emerald-300 border border-emerald-500/30 transition-all font-mono text-xs shadow-sm cursor-pointer"
+              title="Open Forensic Snapshot Evidence Gallery"
+            >
+              <Camera className="w-3.5 h-3.5" />
+              <span>Evidence Gallery</span>
+            </Button>
+          )}
+
+          <Button
             id="btn-reset-alerts"
             onClick={onResetAlerts}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-800/90 hover:bg-slate-700 active:bg-slate-900 border border-slate-700/80 hover:border-slate-500 text-slate-300 hover:text-white transition-all font-mono text-xs shadow-sm cursor-pointer"
+            variant="ghost"
+            size="sm"
+            className="flex items-center gap-1.5 h-7 px-2.5 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white transition-all font-mono text-xs shadow-sm cursor-pointer border border-slate-700/80"
             title="Clear visible incident queue in frontend view (backend logs preserved for IRIS)"
           >
             <RotateCcw className="w-3 h-3 text-slate-400 group-hover:text-amber-400 transition-colors" />
             <span>Reset Alerts</span>
-          </button>
+          </Button>
 
           <div
             className={`px-2.5 py-1 rounded-full font-mono text-xs font-bold border ${
@@ -87,28 +112,32 @@ export const IncidentQueue: React.FC<IncidentQueueProps> = ({
 
       {/* Filter Sub-Bar */}
       <div className="px-4 py-2 bg-slate-950/70 border-b border-slate-800 flex items-center justify-between text-xs font-mono">
-        <div className="flex items-center gap-1.5 text-slate-400">
+        <div className="flex items-center gap-2 text-slate-400">
           <span>FILTER:</span>
-          <button
+          <Button
             onClick={() => onFilterChange('ALL')}
-            className={`px-2 py-0.5 rounded transition-colors ${
+            variant={alertFilter === 'ALL' ? 'default' : 'ghost'}
+            size="sm"
+            className={`h-6 px-2.5 rounded text-xs font-mono transition-all ${
               alertFilter === 'ALL'
-                ? 'bg-slate-800 text-white font-semibold'
-                : 'text-slate-400 hover:text-slate-200'
+                ? 'bg-blue-600 hover:bg-blue-500 text-white font-semibold'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
             }`}
           >
             ALL ({alerts.length})
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={() => onFilterChange('UNACKNOWLEDGED')}
-            className={`px-2 py-0.5 rounded transition-colors ${
+            variant={alertFilter === 'UNACKNOWLEDGED' ? 'default' : 'ghost'}
+            size="sm"
+            className={`h-6 px-2.5 rounded text-xs font-mono transition-all ${
               alertFilter === 'UNACKNOWLEDGED'
-                ? 'bg-slate-800 text-white font-semibold'
-                : 'text-slate-400 hover:text-slate-200'
+                ? 'bg-blue-600 hover:bg-blue-500 text-white font-semibold'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
             }`}
           >
             UNACK ({unacknowledgedCount})
-          </button>
+          </Button>
         </div>
 
         <span className="text-[10px] text-slate-500 uppercase tracking-wider">
@@ -157,7 +186,7 @@ export const IncidentQueue: React.FC<IncidentQueueProps> = ({
                     </span>
                     <span className="font-semibold text-slate-300">{alert.id}</span>
                   </div>
-                  <span className="text-[11px] text-slate-400">{alert.timestamp}</span>
+                  <span className="text-[11px] text-slate-400">{alert.timestamp || alert.time}</span>
                 </div>
 
                 {/* Zone Identifier */}
@@ -182,26 +211,43 @@ export const IncidentQueue: React.FC<IncidentQueueProps> = ({
                     {alert.eventRef ? `REF: ${alert.eventRef}` : 'DISPATCH PROTOCOL'}
                   </span>
 
-                  <button
-                    onClick={() => onToggleAcknowledge(alert.id)}
-                    className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-mono font-medium transition-all ${
-                      alert.acknowledged
-                        ? 'bg-emerald-950/40 text-emerald-400 border border-emerald-500/30 hover:bg-slate-800'
-                        : 'bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 hover:border-slate-500'
-                    }`}
-                  >
-                    {alert.acknowledged ? (
-                      <>
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>Acknowledged</span>
-                      </>
-                    ) : (
-                      <>
-                        <Check className="w-3.5 h-3.5 text-slate-400" />
-                        <span>Acknowledge</span>
-                      </>
+                  <div className="flex items-center gap-2">
+                    {onOpenEvidence && (
+                      <Button
+                        onClick={() => onOpenEvidence(alert)}
+                        variant="ghost"
+                        size="sm"
+                        className="flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-mono text-blue-400 hover:text-white bg-blue-950/40 hover:bg-blue-900/50 border border-blue-500/30 transition-all cursor-pointer"
+                        title="View frame snapshot & forensic metadata"
+                      >
+                        <Camera className="w-3.5 h-3.5" />
+                        <span>Evidence</span>
+                      </Button>
                     )}
-                  </button>
+
+                    <Button
+                      onClick={() => onToggleAcknowledge(alert.id)}
+                      variant={alert.acknowledged ? 'secondary' : 'default'}
+                      size="sm"
+                      className={`flex items-center gap-1.5 h-7 px-3 rounded-lg text-xs font-mono font-medium transition-all ${
+                        alert.acknowledged
+                          ? 'bg-emerald-950/40 text-emerald-400 border border-emerald-500/30 hover:bg-slate-800'
+                          : 'bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 hover:border-slate-500'
+                      }`}
+                    >
+                      {alert.acknowledged ? (
+                        <>
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>Acknowledged</span>
+                        </>
+                      ) : (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-slate-400" />
+                          <span>Acknowledge</span>
+                        </>
+                      )}
+                    </Button>
+                  </div>
                 </div>
               </div>
             );

@@ -13,10 +13,25 @@ import {
 
 type AssistantViewMode = 'docked' | 'split' | 'fullscreen';
 
-export function UATUVoiceAssistantLauncher() {
+import { FlowButton } from './ui/flow-button';
+
+interface UATUVoiceAssistantLauncherProps {
+  variant?: 'sidebar' | 'header' | 'flow';
+  trigger?: (open: () => void) => React.ReactNode;
+}
+
+export function UATUVoiceAssistantLauncher({
+  variant = 'flow',
+  trigger,
+}: UATUVoiceAssistantLauncherProps = {}) {
   const [isOpen, setIsOpen] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
   const [viewMode, setViewMode] = useState<AssistantViewMode>('split');
+
+  const openLauncher = () => {
+    setIsOpen(true);
+    setIsMinimized(false);
+  };
 
   const getDrawerWidthClass = () => {
     switch (viewMode) {
@@ -32,22 +47,29 @@ export function UATUVoiceAssistantLauncher() {
 
   return (
     <>
-      {/* Top Navbar Action Button */}
-      <button
-        onClick={() => {
-          setIsOpen(true);
-          setIsMinimized(false);
-        }}
-        className="flex items-center gap-2 px-3 py-1.5 rounded bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20 hover:border-emerald-500/60 transition-all font-mono text-xs tracking-wider font-semibold shadow-[0_0_12px_rgba(16,185,129,0.15)]"
-        title="Open IRIS / UATU Bilingual Voice & Query Decision-Support Center"
-      >
-        <span className="relative flex h-2 w-2">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-          <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-        </span>
-        <Mic className="w-3.5 h-3.5 text-emerald-400" />
-        <span className="hidden sm:inline">Ask IRIS AI</span>
-      </button>
+      {/* Trigger Action Button */}
+      {trigger ? (
+        trigger(openLauncher)
+      ) : variant === 'header' ? (
+        <button
+          onClick={openLauncher}
+          className="flex items-center gap-2 px-3 py-1.5 rounded bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20 hover:border-emerald-500/60 transition-all font-mono text-xs tracking-wider font-semibold shadow-[0_0_12px_rgba(16,185,129,0.15)]"
+          title="Open IRIS / UATU Bilingual Voice & Query Decision-Support Center"
+        >
+          <span className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+          </span>
+          <Mic className="w-3.5 h-3.5 text-emerald-400" />
+          <span className="hidden sm:inline">Ask IRIS AI</span>
+        </button>
+      ) : (
+        <FlowButton
+          text="Ask IRIS AI"
+          onClick={openLauncher}
+          className="w-full justify-center mt-2"
+        />
+      )}
 
       {/* Persistent Audio / Minimized Status Pill at Bottom-Right */}
       {isOpen && isMinimized && (
